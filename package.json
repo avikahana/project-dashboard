@@ -1,0 +1,16 @@
+{
+  "name": "avi-project-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "sync": "node scripts/sync-projects.mjs",
+    "sync:dry-run": "node scripts/sync-projects.mjs --dry-run",
+    "check": "node --check server.mjs && node --check public/app.js && node --check lib/project-sync.mjs && node --check scripts/sync-projects.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,8 @@
+# Runtime state; contains private project details, never commit
+data/
+
+# Local tooling config (preview launcher recreates it)
+.claude/
+
+node_modules/
+.DS_Store

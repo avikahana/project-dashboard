@@ -1,0 +1,1291 @@
+const HIDDEN_PROJECTS_KEY = "dashboard-hidden-projects";
+const PINNED_PROJECTS_KEY = "dashboard-pinned-projects";
+const AUTO_REFRESH_MS = 30000;
+const FOCUS_REFRESH_STALE_MS = 5000;
+const MAX_VISIBLE_MILESTONES = 12;
+const NEXT_PROJECT_PREVIEW_LIMIT = 6;
+
+function readStoredSet(key) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "[]");
+    return new Set(Array.isArray(value) ? value : []);
+  } catch {
+    return new Set();
+  }
+}
+
+const state = {
+  projects: [],
+  sourceFilter: "all",
+  statusFilter: "all",
+  sortMode: "progress",
+  query: "",
+  showAllCompleted: false,
+  showAllNextProjects: false,
+  generatedAt: null,
+  nextProjects: [],
+  theme: localStorage.getItem("dashboard-theme") || "dark",
+  collapsedGroups: new Set(),
+  expandedProjects: new Set(),
+  hiddenProjects: readStoredSet(HIDDEN_PROJECTS_KEY),
+  pinnedProjects: readStoredSet(PINNED_PROJECTS_KEY),
+  activeMenuProjectId: null,
+  healthById: new Map(),
+  toastTimer: null,
+  loadingProjects: null,
+  projectLoadVersion: 0,
+  lastProjectLoadStartedAt: 0
+};
+
+const elements = {
+  list: document.querySelector("#project-list"),
+  onlineSection: document.querySelector("#online-section"),
+  completedPanel: document.querySelector("#completed-panel"),
+  completedList: document.querySelector("#completed-list"),
+  nextProjects: document.querySelector("#next-projects"),
+  nextProjectList: document.querySelector("#next-project-list"),
+  nextProjectCount: document.querySelector("#next-project-count"),
+  toggleNextProjects: document.querySelector("#toggle-next-projects"),
+  template: document.querySelector("#project-card-template"),
+  search: document.querySelector("#search"),
+  sourceTabs: [...document.querySelectorAll(".source-tab")],
+  statusTabs: [...document.querySelectorAll(".status-tab")],
+  sortTabs: [...document.querySelectorAll(".sort-tab")],
+  refreshProjects: document.querySelector("#refresh-projects"),
+  refreshHealth: document.querySelector("#refresh-health"),
+  themeToggle: document.querySelector("#theme-toggle"),
+  themeToggleLabel: document.querySelector("#theme-toggle-label"),
+  toggleCompleted: document.querySelector("#toggle-completed"),
+  toggleGroups: document.querySelector("#toggle-groups"),
+  backToTop: document.querySelector("#back-to-top"),
+  toast: document.querySelector("#toast"),
+  lastUpdated: document.querySelector("#last-updated"),
+  viewEyebrow: document.querySelector("#view-eyebrow"),
+  viewTitle: document.querySelector("#view-title"),
+  metrics: {
+    showing: document.querySelector("#metric-showing"),
+    planning: document.querySelector("#metric-planning"),
+    scheduled: document.querySelector("#metric-scheduled"),
+    completed: document.querySelector("#metric-completed"),
+    online: document.querySelector("#metric-online"),
+    review: document.querySelector("#metric-review")
+  }
+};
+
+function applyTheme() {
+  document.documentElement.dataset.theme = state.theme;
+  elements.themeToggle.setAttribute("aria-pressed", String(state.theme === "dark"));
+  elements.themeToggleLabel.textContent = state.theme === "dark" ? "Dark" : "Light";
+}
+
+const sourceLabels = {
+  all: "All",
+  claude: "Claude",
+  codex: "Codex"
+};
+
+const statusLabels = {
+  all: ["All", "Every tracked project"],
+  ongoing: ["Ongoing", "Current work"],
+  completed: ["Completed", "Done and discoverable"],
+  online: ["Online", "Configured live sites"],
+  review: ["Needs review", "Unknowns to clean up"],
+  duplicates: ["Duplicates", "Name or source collisions"]
+};
+
+const sourceDisplayLabels = {
+  claude: "Claude",
+  "codex-workspace": "Codex workspace",
+  "codex-local": "Codex local"
+};
+
+// Order and display labels for the collapsible status groups.
+const PRIVATE_GROUP_KEY = "private-list";
+const PINNED_GROUP_KEY = "pinned-projects";
+const GROUP_ORDER = [PINNED_GROUP_KEY, "active", "scheduled", "building", "maintenance", "planning", "paused", "blocked", "completed", PRIVATE_GROUP_KEY];
+const ONLINE_GROUP_KEY = "online";
+
+function isScheduledProject(project) {
+  const tags = new Set((project.tags || []).map((tag) => String(tag).toLowerCase()));
+  return tags.has("scheduled") || tags.has("automation") || tags.has("reminders") || tags.has("monitors");
+}
+
+function isOnlineProject(project) {
+  return Boolean(project.liveUrl || project.healthCheckUrl || project.type === "online");
+}
+
+// Online membership is additive: online projects still land in their status
+// group here, and additionally get a card in the separate Online section.
+function groupKey(project) {
+  if (state.pinnedProjects.has(projectId(project))) return PINNED_GROUP_KEY;
+  if (state.hiddenProjects.has(projectId(project))) return PRIVATE_GROUP_KEY;
+  if (isScheduledProject(project)) return "scheduled";
+  return statusClass(project.status || "other") || "other";
+}
+
+function onlineDisplayName(project) {
+  return project.onlineLabel || project.name;
+}
+
+function sortGroups(keys) {
+  return [...keys].sort((a, b) => {
+    const ia = GROUP_ORDER.indexOf(a);
+    const ib = GROUP_ORDER.indexOf(b);
+    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a.localeCompare(b);
+  });
+}
+
+function projectUpdatedTime(project) {
+  const value = project.updatedAt || project.completedAt || project.git?.lastCommit?.date || "";
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function compareProjectsWithinGroup(a, b) {
+  if (state.sortMode === "updated") {
+    return projectUpdatedTime(b) - projectUpdatedTime(a) ||
+      String(a.name || "").localeCompare(String(b.name || ""));
+  }
+
+  if (state.sortMode === "alpha") {
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  }
+
+  return (b.progress ?? -1) - (a.progress ?? -1) ||
+    projectUpdatedTime(b) - projectUpdatedTime(a) ||
+    String(a.name || "").localeCompare(String(b.name || ""));
+}
+
+function projectId(project) {
+  return project.id || project.statusFile || project.localPath || project.name;
+}
+
+function saveHiddenProjects() {
+  localStorage.setItem(HIDDEN_PROJECTS_KEY, JSON.stringify([...state.hiddenProjects]));
+}
+
+function savePinnedProjects() {
+  localStorage.setItem(PINNED_PROJECTS_KEY, JSON.stringify([...state.pinnedProjects]));
+}
+
+function updateBackToTop() {
+  elements.backToTop.hidden = window.scrollY < 520;
+}
+
+function showToast(message) {
+  window.clearTimeout(state.toastTimer);
+  elements.toast.textContent = message;
+  elements.toast.hidden = false;
+  state.toastTimer = window.setTimeout(() => {
+    elements.toast.hidden = true;
+  }, 1800);
+}
+
+function compactDate(value) {
+  if (!value) return "Unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function statusClass(value = "") {
+  const normalized = value.toLowerCase().replace(/\s+/g, "-");
+  if (!normalized) return "";
+  if (["complete", "completed", "done", "finished", "shipped", "closed", "resolved"].includes(normalized)) return "completed";
+  if (["idea", "backlog", "planned", "planning", "proposed", "proposal", "todo", "not-started"].includes(normalized)) return "planning";
+  if (["build", "building", "development", "developing", "develop", "implementation", "implementing", "implement", "code", "coding", "test", "testing", "wip"].includes(normalized)) return "building";
+  if (["active", "activate", "activated", "activation", "ongoing", "in-progress", "working", "started", "open", "current"].includes(normalized)) return "active";
+  if (["blocked", "blocker", "stuck", "waiting", "waiting-on", "needs-input"].includes(normalized)) return "blocked";
+  if (["pause", "paused", "hold", "on-hold", "deferred", "parked", "shelved", "archived"].includes(normalized)) return "paused";
+  if (["live", "production", "prod", "maintain", "maintaining", "maintenance"].includes(normalized)) return "maintenance";
+  return "active";
+}
+
+function projectNeedsReview(project) {
+  if (isScheduledProject(project)) {
+    return Boolean(project.nameCollision || project.sourceCollision);
+  }
+
+  return project.progress === null ||
+    project.progress === undefined ||
+    project.confidence === "low" ||
+    Boolean(project.nameCollision) ||
+    Boolean(project.health && (project.health.status === "Down" || project.health.error)) ||
+    Boolean(project.localPath && !project.localPathFound);
+}
+
+function isOngoing(project) {
+  return statusClass(project.status) !== "completed" && !isScheduledProject(project);
+}
+
+function isClaudeProject(project) {
+  return project.type === "claude" ||
+    (project.tags || []).includes("claude") ||
+    String(project.localPath || "").includes("/Workspace/Claude/");
+}
+
+function isCodexProject(project) {
+  const localPath = String(project.localPath || "");
+  return project.type === "codex" ||
+    (project.tags || []).includes("codex") ||
+    localPath.includes("/Workspace/Codex/") ||
+    localPath.includes("/Documents/Codex/");
+}
+
+function matchesSource(project) {
+  if (state.sourceFilter === "claude") return isClaudeProject(project);
+  if (state.sourceFilter === "codex") return isCodexProject(project);
+  return true;
+}
+
+function matchesStatus(project) {
+  if (state.statusFilter === "all") return true;
+  if (state.statusFilter === "ongoing") return isOngoing(project);
+  if (state.statusFilter === "completed") return statusClass(project.status) === "completed";
+  if (state.statusFilter === "online") return isOnlineProject(project);
+  if (state.statusFilter === "review") return projectNeedsReview(project);
+  if (state.statusFilter === "duplicates") return Boolean(project.nameCollision || project.sourceCollision);
+  return true;
+}
+
+function matchesSearch(project) {
+  if (!state.query) return true;
+  const haystack = [
+    project.name,
+    project.status,
+    project.type,
+    project.localPath,
+    project.repoUrl,
+    project.liveUrl,
+    project.notes,
+    project.nextAction,
+    projectRole(project),
+    ...(project.tags || [])
+  ].filter(Boolean).join(" ").toLowerCase();
+  return haystack.includes(state.query.toLowerCase());
+}
+
+function labelize(value) {
+  return String(value || "unknown")
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function sourceLabel(project) {
+  if (project.source === "codex-automation") return "Scheduled";
+  return sourceDisplayLabels[project.source] || labelize(project.source || project.type || "unknown");
+}
+
+function projectRole(project) {
+  const tags = new Set((project.tags || []).map((tag) => String(tag).toLowerCase()));
+  const name = String(project.name || "").toLowerCase();
+
+  if (tags.has("brain") || name.includes("brain")) return "Private Brain";
+  if (tags.has("repo") || project.type === "repo" || project.repoUrl) return "Product repo";
+  if (project.type === "online" || project.liveUrl || project.healthCheckUrl) return "Live website";
+  if (isScheduledProject(project)) return "Automation control";
+  if (tags.has("knowledge") || tags.has("source")) return "Knowledge workspace";
+  if (tags.has("resume") || tags.has("career")) return "Career workspace";
+  if (tags.has("home-assistant") || tags.has("integration")) return "Integration workspace";
+  if (tags.has("legal")) return "Legal workspace";
+  if (project.confidence === "low" || tags.has("needs-review")) return "Needs triage";
+  return "Project workspace";
+}
+
+function scheduledMeta(project) {
+  if (!isScheduledProject(project)) return null;
+  return project.automation?.status || labelize(project.status || "scheduled");
+}
+
+function pathShortName(project) {
+  const segments = String(project.localPath || "")
+    .split("/")
+    .filter(Boolean);
+  return segments.at(-1) || sourceLabel(project);
+}
+
+function normalizedProjectName(project) {
+  return String(project.name || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function annotateProjectRelationships(projects) {
+  const byName = new Map();
+  const bySource = new Map();
+
+  projects.forEach((project) => {
+    const key = normalizedProjectName(project);
+    if (!key) return;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(project);
+
+    const sourceKey = project.statusFile || project.localPath;
+    if (!sourceKey) return;
+    if (!bySource.has(sourceKey)) bySource.set(sourceKey, []);
+    bySource.get(sourceKey).push(project);
+  });
+
+  return projects.map((project) => {
+    const matches = byName.get(normalizedProjectName(project)) || [];
+    const distinctPaths = new Set(matches.map((match) => match.localPath).filter(Boolean));
+    const sourceMatches = bySource.get(project.statusFile || project.localPath) || [];
+    const sourceCollision = sourceMatches.length > 1
+      ? {
+          count: sourceMatches.length,
+          ids: sourceMatches.map((match) => projectId(match))
+        }
+      : null;
+
+    if (matches.length < 2 || distinctPaths.size < 2) {
+      return { ...project, nameCollision: null, sourceCollision };
+    }
+
+    return {
+      ...project,
+      sourceCollision,
+      nameCollision: {
+        count: matches.length,
+        homes: matches
+          .filter((match) => projectId(match) !== projectId(project))
+          .map((match) => `${sourceLabel(match)}: ${match.localPath || match.name}`)
+      }
+    };
+  });
+}
+
+function createBadge(text, variant = "", title = "") {
+  const badge = document.createElement("span");
+  badge.className = `badge ${variant}`.trim();
+  badge.textContent = text;
+  if (title) badge.title = title;
+  return badge;
+}
+
+function appendEvidence(list, label, value, title = "") {
+  const dt = document.createElement("dt");
+  const dd = document.createElement("dd");
+  dt.textContent = label;
+  dd.textContent = value || "Unknown";
+  if (title) {
+    dt.title = title;
+    dd.title = title;
+  }
+  list.append(dt, dd);
+}
+
+function createLink(label, href) {
+  const link = document.createElement("a");
+  link.className = "link-pill";
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noreferrer";
+  link.textContent = label;
+  return link;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall through to the focused textarea fallback below.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "-999px";
+  document.body.append(textarea);
+  textarea.focus();
+  textarea.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    textarea.remove();
+  }
+}
+
+function createCopyButton(label, value) {
+  const button = document.createElement("button");
+  button.className = "copy-button";
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", async () => {
+    await copyText(value);
+    button.textContent = "Copied";
+    window.setTimeout(() => {
+      button.textContent = label;
+    }, 1200);
+  });
+  return button;
+}
+
+function buildNextProjectContext(item) {
+  return [
+    formatLine("Project idea", item.title),
+    formatLine("Category", item.category),
+    formatLine("Status", item.status),
+    formatLine("Summary", item.summary),
+    formatLine("Why it matters", item.why),
+    formatLine("Next action", item.nextAction),
+    formatLine("Source thread", item.sourceThreadId)
+  ].join("\n");
+}
+
+function formatLine(label, value) {
+  return value === null || value === undefined || value === "" ? `${label}: Not set` : `${label}: ${value}`;
+}
+
+function buildAgentContext(project) {
+  const milestones = (project.milestones || [])
+    .map((milestone) => `- ${milestone.done ? "[done]" : "[open]"} ${milestone.name}`)
+    .join("\n") || "- Not set";
+  const tags = (project.tags || []).join(", ") || "Not set";
+  const git = project.git?.available
+    ? [
+        formatLine("Branch", project.git.branch),
+        formatLine("Dirty", project.git.dirty ? `${project.git.changedFiles} changed files` : "clean"),
+        formatLine("Last commit", project.git.lastCommit ? `${project.git.lastCommit.hash} - ${project.git.lastCommit.subject}` : null),
+        formatLine("Remote", project.git.remoteUrl)
+      ].join("\n")
+    : formatLine("Git", project.git?.reason || "Not checked");
+
+  return [
+    "I want to ask about this dashboard project. Use this context, and inspect the local path or status file when you need more evidence.",
+    "",
+    formatLine("Project", project.name),
+    formatLine("ID", projectId(project)),
+    formatLine("Type", project.type),
+    formatLine("Source", project.source),
+    formatLine("Status", project.status),
+    formatLine("Phase", project.phase),
+    formatLine("Progress", Number.isFinite(project.progress) ? `${project.progress}%` : "Unknown"),
+    formatLine("Confidence", project.confidence),
+    formatLine("Project home", project.projectHome || project.localPath),
+    formatLine("Repo path", project.repoPath),
+    formatLine("Status file", project.statusFile),
+    formatLine("Repo URL", project.repoUrl || project.git?.remoteUrl),
+    formatLine("Live URL", project.liveUrl),
+    formatLine("Health check URL", project.healthCheckUrl),
+    formatLine("Next action", project.nextAction),
+    formatLine("Notes", project.notes),
+    formatLine("Tags", tags),
+    "",
+    "Milestones:",
+    milestones,
+    "",
+    "Git:",
+    git
+  ].join("\n");
+}
+
+async function shareProjectContext(project) {
+  const text = buildAgentContext(project);
+  const title = `${project.name} project context`;
+
+  if (navigator.share) {
+    try {
+      await navigator.share({ title, text });
+      showToast("Project context shared");
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+    }
+  }
+
+  await copyText(text);
+  showToast("Agent context copied");
+}
+
+function renderProject(project) {
+  const node = elements.template.content.firstElementChild.cloneNode(true);
+  const progress = Number.isFinite(project.progress) ? project.progress : null;
+  const healthStatus = project.health?.status || (project.liveUrl || project.healthCheckUrl ? "Unknown" : null);
+  const repoUrl = project.repoUrl || project.git?.remoteUrl;
+  const progressValue = node.querySelector(".progress-value");
+
+  node.dataset.status = statusClass(project.status);
+  node.querySelector(".project-type").textContent = `Type: ${labelize(project.type || "project")} / Status: ${labelize(project.status)}`;
+  node.querySelector("h3").textContent = project.name;
+
+  const badges = node.querySelector(".badge-row");
+  badges.append(createBadge(`Status: ${labelize(project.status)}`, statusClass(project.status), "Current workflow state for this project"));
+  badges.append(createBadge(project.confidence ? `Confidence: ${labelize(project.confidence)}` : "Confidence: Unknown", project.confidence === "low" ? "review" : "", "How sure the dashboard seed data is"));
+  badges.append(createBadge(projectRole(project), "", "What role this tracked project plays"));
+  badges.append(createBadge(sourceLabel(project), "", "Dashboard source root for this card"));
+  if (healthStatus) badges.append(createBadge(`Health: ${healthStatus}`, statusClass(healthStatus), "Live website or bot health, separate from progress"));
+  if (project.nameCollision) badges.append(createBadge("Same name", "review", `Also tracked as ${project.nameCollision.homes.join("; ")}`));
+  if (project.sourceCollision) badges.append(createBadge("Same source", "review", "Multiple dashboard records point at the same status file or local path"));
+  if (projectNeedsReview(project)) badges.append(createBadge("Review needed", "review", "Some project fields are missing, uncertain, or need confirmation"));
+
+  progressValue.textContent = scheduledMeta(project) || (progress === null ? "Progress unknown" : `${progress}%`);
+  progressValue.classList.toggle("is-unknown", progress === null);
+  node.querySelector(".phase").textContent = project.automation?.schedule || project.phase || "Unknown phase";
+  node.querySelector(".progress-track span").style.setProperty("--progress-width", progress === null ? "0%" : `${Math.max(0, Math.min(100, progress))}%`);
+  node.querySelector(".next-action").textContent = project.nextAction ? `Next: ${project.nextAction}` : "Next: Not set";
+  node.querySelector(".notes").textContent = project.notes || "";
+
+  const milestones = node.querySelector(".milestones");
+  const projectMilestones = project.milestones || [];
+  const openMilestones = projectMilestones.filter((milestone) => !milestone.done);
+  const doneMilestones = projectMilestones.filter((milestone) => milestone.done);
+  const doneLimit = Math.max(0, MAX_VISIBLE_MILESTONES - openMilestones.length);
+  // slice(-0) would return every done milestone, so guard the zero case.
+  const visibleMilestones = doneLimit > 0
+    ? [...openMilestones, ...doneMilestones.slice(-doneLimit)]
+    : openMilestones;
+  visibleMilestones.forEach((milestone) => {
+    const item = document.createElement("span");
+    item.className = `milestone ${milestone.done ? "done" : ""}`.trim();
+    item.textContent = `${milestone.done ? "Done" : "Open"}: ${milestone.name}`;
+    milestones.append(item);
+  });
+  const hiddenMilestoneCount = projectMilestones.length - visibleMilestones.length;
+  if (hiddenMilestoneCount > 0) {
+    const summary = document.createElement("span");
+    summary.className = "milestone milestone-summary";
+    summary.textContent = `${hiddenMilestoneCount} more completed`;
+    milestones.append(summary);
+  }
+
+  const evidence = node.querySelector(".evidence");
+  appendEvidence(evidence, "Role", projectRole(project), "How this card should be interpreted");
+  if (project.automation) {
+    appendEvidence(evidence, "Schedule", project.automation.schedule, "When this automation is configured to run");
+    appendEvidence(evidence, "Kind", labelize(project.automation.kind || "automation"), "Automation type");
+    appendEvidence(evidence, "Model", project.automation.model, "Model configured for this scheduled run");
+  }
+  appendEvidence(evidence, "Source", sourceLabel(project), "Dashboard source root that discovered this project");
+  appendEvidence(evidence, "Folder", project.localPathFound ? "Found" : project.localPath ? "Missing" : "Not set", "Whether the configured localPath exists on this Mac");
+  appendEvidence(evidence, "Project home", project.projectHome || project.localPath || "Not set", "Private project context folder");
+  appendEvidence(evidence, "Repo path", project.repoPath || "Not set", "Clean code repository folder");
+  appendEvidence(evidence, "Git state", project.git?.available ? `${project.git.branch}, ${project.git.dirty ? "uncommitted changes" : "clean"}` : project.git?.reason, "Current branch and whether Git sees local changes");
+  appendEvidence(evidence, "Last commit", project.git?.lastCommit ? `${compactDate(project.git.lastCommit.date)} / ${project.git.lastCommit.hash}` : "Unknown", "Most recent commit in the local repo");
+  appendEvidence(evidence, "Changed files", project.git?.available ? `${project.git.changedFiles} files` : "Unknown", "Number of changed or untracked files Git sees");
+  appendEvidence(evidence, "Live health", project.health ? `${project.health.status}${project.health.statusCode ? ` / ${project.health.statusCode}` : ""}` : healthStatus || "Not online", "Result of the latest configured live URL check");
+  appendEvidence(evidence, "Last checked", project.health?.checkedAt ? compactDate(project.health.checkedAt) : "Not checked", "When live health was last checked from this dashboard");
+  appendEvidence(evidence, "Completed", project.completedAt || "Not completed", "Completion date from the dashboard config");
+
+  const links = node.querySelector(".links");
+  if (project.projectHome || project.localPath) links.append(createCopyButton("Copy home", project.projectHome || project.localPath));
+  if (project.repoPath) links.append(createCopyButton("Copy repo", project.repoPath));
+  if (repoUrl) links.append(createLink("Repo", repoUrl));
+  if (project.liveUrl) links.append(createLink("Live", project.liveUrl));
+
+  return node;
+}
+
+function renderCompactRow(project) {
+  const id = projectId(project);
+  const expanded = state.expandedProjects.has(id);
+  const hidden = state.hiddenProjects.has(id);
+  const pinned = state.pinnedProjects.has(id);
+  const progress = Number.isFinite(project.progress) ? project.progress : null;
+  const review = projectNeedsReview(project);
+  const maskPrivateTitle = hidden && !expanded;
+  const displayName = maskPrivateTitle ? "Private project" : project.name;
+
+  const row = document.createElement("div");
+  row.className = "compact-row";
+  row.dataset.status = statusClass(project.status);
+  row.dataset.projectId = id;
+  if (expanded) row.classList.add("is-open");
+  if (hidden) row.classList.add("is-private");
+  if (pinned) row.classList.add("is-pinned");
+  if (state.activeMenuProjectId === id) row.classList.add("is-menu-open");
+
+  const rowHead = document.createElement("div");
+  rowHead.className = "row-head";
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "row-trigger";
+  trigger.setAttribute("aria-expanded", String(expanded));
+
+  const chevron = document.createElement("span");
+  chevron.className = "row-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "›";
+
+  const dot = document.createElement("span");
+  dot.className = "row-dot";
+  dot.setAttribute("aria-hidden", "true");
+
+  const name = document.createElement("span");
+  name.className = "row-name";
+  if (maskPrivateTitle) name.classList.add("is-masked");
+  name.textContent = displayName;
+
+  const home = document.createElement("span");
+  home.className = "row-home";
+  home.textContent = hidden && !expanded ? "Private" : `${sourceLabel(project)} / ${projectRole(project)} / ${pathShortName(project)}`;
+
+  const meta = document.createElement("span");
+  meta.className = "row-meta";
+  meta.textContent = scheduledMeta(project) || (progress === null ? "—" : `${progress}%`);
+  if (progress === null) meta.classList.add("is-unknown");
+
+  trigger.append(chevron, dot, name, home, meta);
+  if (project.nameCollision) {
+    const duplicate = document.createElement("span");
+    duplicate.className = "row-flag";
+    duplicate.title = `Same project name is tracked in ${project.nameCollision.count} places`;
+    duplicate.textContent = "same name";
+    trigger.append(duplicate);
+  }
+  if (project.sourceCollision) {
+    const duplicate = document.createElement("span");
+    duplicate.className = "row-flag";
+    duplicate.title = `Same source is tracked by ${project.sourceCollision.count} records`;
+    duplicate.textContent = "same source";
+    trigger.append(duplicate);
+  }
+  if (review) {
+    const flag = document.createElement("span");
+    flag.className = "row-flag";
+    flag.title = "Needs review";
+    flag.textContent = "review";
+    trigger.append(flag);
+  }
+
+  trigger.addEventListener("click", () => {
+    if (state.expandedProjects.has(id)) state.expandedProjects.delete(id);
+    else state.expandedProjects.add(id);
+    render();
+  });
+
+  const menuWrap = document.createElement("div");
+  menuWrap.className = "row-menu-wrap";
+
+  const menuButton = document.createElement("button");
+  menuButton.type = "button";
+  menuButton.className = "row-menu-button";
+  menuButton.textContent = "...";
+  menuButton.title = "Project actions";
+  menuButton.setAttribute("aria-label", `Project actions for ${displayName}`);
+  menuButton.setAttribute("aria-haspopup", "menu");
+  menuButton.setAttribute("aria-expanded", String(state.activeMenuProjectId === id));
+  menuButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    state.activeMenuProjectId = state.activeMenuProjectId === id ? null : id;
+    render();
+  });
+
+  menuWrap.append(menuButton);
+
+  if (state.activeMenuProjectId === id) {
+    const menu = document.createElement("div");
+    menu.className = "row-menu";
+    menu.setAttribute("role", "menu");
+    menu.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+
+    const shareButton = document.createElement("button");
+    shareButton.type = "button";
+    shareButton.setAttribute("role", "menuitem");
+    shareButton.textContent = "Share with agent";
+    shareButton.addEventListener("click", async () => {
+      state.activeMenuProjectId = null;
+      render();
+      await shareProjectContext(project);
+    });
+
+    const pinButton = document.createElement("button");
+    pinButton.type = "button";
+    pinButton.setAttribute("role", "menuitem");
+    pinButton.textContent = pinned ? "Unpin project" : "Pin project";
+    pinButton.addEventListener("click", () => {
+      if (pinned) {
+        state.pinnedProjects.delete(id);
+      } else {
+        state.pinnedProjects.add(id);
+        state.hiddenProjects.delete(id);
+        saveHiddenProjects();
+      }
+      state.activeMenuProjectId = null;
+      savePinnedProjects();
+      render();
+    });
+
+    const privacyButton = document.createElement("button");
+    privacyButton.type = "button";
+    privacyButton.setAttribute("role", "menuitem");
+    privacyButton.textContent = hidden ? "Show in groups" : "Move to private";
+    privacyButton.addEventListener("click", () => {
+      if (hidden) {
+        state.hiddenProjects.delete(id);
+      } else {
+        state.hiddenProjects.add(id);
+        state.pinnedProjects.delete(id);
+        savePinnedProjects();
+      }
+      state.activeMenuProjectId = null;
+      state.expandedProjects.delete(id);
+      saveHiddenProjects();
+      render();
+    });
+
+    menu.append(shareButton, pinButton, privacyButton);
+    menuWrap.append(menu);
+  }
+
+  rowHead.append(trigger, menuWrap);
+  row.append(rowHead);
+
+  if (expanded) {
+    const detail = document.createElement("div");
+    detail.className = "row-detail";
+    detail.append(renderProject(project));
+    row.append(detail);
+  }
+
+  return row;
+}
+
+function renderGroupedList(container, projects) {
+  const groups = new Map();
+  projects.forEach((project) => {
+    const key = groupKey(project);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(project);
+  });
+
+  const fragments = sortGroups(groups.keys()).map((key) => {
+    const items = groups.get(key).sort(compareProjectsWithinGroup);
+    const collapsed = state.collapsedGroups.has(key);
+
+    const group = document.createElement("section");
+    group.className = "project-group";
+    group.dataset.status = key;
+
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "group-head";
+    head.setAttribute("aria-expanded", String(!collapsed));
+
+    const gchevron = document.createElement("span");
+    gchevron.className = "group-chevron";
+    gchevron.setAttribute("aria-hidden", "true");
+    gchevron.textContent = "▾";
+
+    const gname = document.createElement("span");
+    gname.className = "group-name";
+    gname.textContent = labelize(key);
+
+    const gcount = document.createElement("span");
+    gcount.className = "group-count";
+    gcount.textContent = String(items.length);
+
+    head.append(gchevron, gname, gcount);
+    head.addEventListener("click", () => {
+      if (state.collapsedGroups.has(key)) state.collapsedGroups.delete(key);
+      else state.collapsedGroups.add(key);
+      render();
+    });
+
+    group.append(head);
+
+    if (!collapsed) {
+      const body = document.createElement("div");
+      body.className = "group-body";
+      body.append(...items.map(renderCompactRow));
+      group.append(body);
+    }
+
+    return group;
+  });
+
+  container.replaceChildren(...fragments);
+}
+
+// Status tabs where the Online section renders above the grouped list.
+const ONLINE_SECTION_TABS = new Set(["all", "ongoing", "online"]);
+
+function onlineTone(health) {
+  if (!health || !health.status || health.status === "Unknown") return "unknown";
+  if (health.status === "Live") return "up";
+  if (health.status === "Redirecting" || health.status === "Auth required") return "reachable";
+  return "down";
+}
+
+function onlineStatusText(health) {
+  if (!health || !health.status) return "Not checked yet";
+  const parts = [health.status];
+  if (health.statusCode) parts.push(String(health.statusCode));
+  if (Number.isFinite(health.responseTimeMs)) parts.push(`${health.responseTimeMs} ms`);
+  if (health.checkedAt) parts.push(`checked ${compactDate(health.checkedAt)}`);
+  return parts.join(" / ");
+}
+
+function focusProjectCard(project) {
+  const id = projectId(project);
+  // The grouped list is absent on the Online tab and the project may live on
+  // another tab (e.g. a completed site), so fall back to the All view.
+  if (state.statusFilter === "online" || !getVisibleProjects().some((candidate) => projectId(candidate) === id)) {
+    state.statusFilter = "all";
+  }
+  state.collapsedGroups.delete(groupKey(project));
+  state.expandedProjects.add(id);
+  render();
+  document.querySelector(`.compact-row[data-project-id="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderOnlineCard(project) {
+  const hidden = state.hiddenProjects.has(projectId(project));
+  const health = project.health || null;
+
+  const card = document.createElement("article");
+  card.className = "online-card";
+  card.dataset.tone = onlineTone(health);
+
+  const head = document.createElement("div");
+  head.className = "online-head";
+
+  const dot = document.createElement("span");
+  dot.className = "online-dot";
+  dot.setAttribute("aria-hidden", "true");
+
+  const name = document.createElement("h3");
+  name.textContent = onlineDisplayName(project);
+
+  head.append(dot, name);
+
+  const host = document.createElement("p");
+  host.className = "online-host";
+  try {
+    host.textContent = new URL(project.liveUrl || project.healthCheckUrl).hostname;
+  } catch {
+    host.textContent = project.liveUrl || project.healthCheckUrl || "";
+  }
+
+  const status = document.createElement("p");
+  status.className = "online-status";
+  status.textContent = onlineStatusText(health);
+
+  const links = document.createElement("div");
+  links.className = "online-links";
+  if (project.liveUrl) links.append(createLink("Open", project.liveUrl));
+
+  const jump = document.createElement("button");
+  jump.type = "button";
+  jump.className = "link-pill";
+  jump.textContent = "Project card";
+  if (hidden) {
+    // Private projects keep their online card, but it stays status-only.
+    jump.disabled = true;
+    jump.title = "Private project";
+  } else {
+    jump.addEventListener("click", () => focusProjectCard(project));
+  }
+  links.append(jump);
+
+  card.append(head, host, status, links);
+  return card;
+}
+
+function renderOnlineSection(onlineProjects) {
+  const hasProjects = onlineProjects.length > 0;
+  elements.onlineSection.hidden = !hasProjects;
+  if (!hasProjects) {
+    elements.onlineSection.replaceChildren();
+    return;
+  }
+
+  const collapsed = state.collapsedGroups.has(ONLINE_GROUP_KEY);
+
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "group-head";
+  head.setAttribute("aria-expanded", String(!collapsed));
+
+  const chevron = document.createElement("span");
+  chevron.className = "group-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "▾";
+
+  const name = document.createElement("span");
+  name.className = "group-name";
+  name.textContent = "Online";
+
+  const count = document.createElement("span");
+  count.className = "group-count";
+  count.textContent = String(onlineProjects.length);
+
+  head.append(chevron, name, count);
+  head.addEventListener("click", () => {
+    if (state.collapsedGroups.has(ONLINE_GROUP_KEY)) state.collapsedGroups.delete(ONLINE_GROUP_KEY);
+    else state.collapsedGroups.add(ONLINE_GROUP_KEY);
+    render();
+  });
+
+  const children = [head];
+  if (!collapsed) {
+    const body = document.createElement("div");
+    body.className = "online-list";
+    const sorted = [...onlineProjects].sort((a, b) => onlineDisplayName(a).localeCompare(onlineDisplayName(b)));
+    body.append(...sorted.map(renderOnlineCard));
+    children.push(body);
+  }
+
+  elements.onlineSection.replaceChildren(...children);
+}
+
+function groupKeysOf(projects) {
+  const keys = [];
+  const seen = new Set();
+  projects.forEach((project) => {
+    const key = groupKey(project);
+    if (!seen.has(key)) {
+      seen.add(key);
+      keys.push(key);
+    }
+  });
+  return keys;
+}
+
+function projectIdsOf(projects) {
+  return projects.map(projectId);
+}
+
+function allVisibleExpanded(projects) {
+  const keys = groupKeysOf(projects);
+  const projectIds = projectIdsOf(projects);
+  return keys.length > 0 &&
+    keys.every((key) => !state.collapsedGroups.has(key)) &&
+    projectIds.every((id) => state.expandedProjects.has(id));
+}
+
+function updateGroupToggle(visible) {
+  const keys = groupKeysOf(visible);
+  elements.toggleGroups.disabled = keys.length === 0;
+  elements.toggleGroups.textContent = allVisibleExpanded(visible) ? "Collapse all" : "Expand all";
+}
+
+function getScopedProjects() {
+  return state.projects.filter(matchesSource);
+}
+
+function getVisibleProjects() {
+  return getScopedProjects().filter((project) => matchesStatus(project) && matchesSearch(project));
+}
+
+function renderMetrics(visible) {
+  const scoped = getScopedProjects();
+  const ongoing = scoped.filter(isOngoing).length;
+  const planning = scoped.filter((project) => statusClass(project.status) === "planning").length;
+  const completed = scoped.filter((project) => statusClass(project.status) === "completed").length;
+  const scheduled = scoped.filter(isScheduledProject).length;
+  const onlineProjects = scoped.filter(isOnlineProject);
+  const review = scoped.filter(projectNeedsReview).length;
+
+  elements.metrics.showing.textContent = ongoing;
+  elements.metrics.planning.textContent = planning;
+  elements.metrics.scheduled.textContent = scheduled;
+  elements.metrics.completed.textContent = completed;
+  elements.metrics.online.textContent = onlineProjects.length;
+  elements.metrics.review.textContent = review;
+}
+
+function renderCompletedPanel() {
+  const completed = getScopedProjects()
+    .filter((project) => statusClass(project.status) === "completed")
+    .sort((a, b) => String(b.completedAt || "").localeCompare(String(a.completedAt || "")));
+  const visible = state.showAllCompleted ? completed : completed.slice(0, 3);
+
+  elements.completedPanel.hidden = state.statusFilter !== "ongoing";
+  elements.toggleCompleted.textContent = state.showAllCompleted ? "Show last completed" : "Show all completed";
+  elements.completedList.replaceChildren(...visible.map(renderProject));
+
+  if (visible.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No completed projects are configured yet.";
+    elements.completedList.replaceChildren(empty);
+  }
+}
+
+function renderNextProject(item) {
+  const card = document.createElement("article");
+  card.className = "next-project-card";
+
+  const header = document.createElement("div");
+  header.className = "next-project-header";
+
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = item.title || "Untitled idea";
+  const meta = document.createElement("p");
+  meta.className = "next-project-meta";
+  meta.textContent = [item.category, item.status].filter(Boolean).join(" / ") || "Idea";
+  titleWrap.append(title, meta);
+
+  const copy = createCopyButton("Copy idea", buildNextProjectContext(item));
+  header.append(titleWrap, copy);
+
+  const summary = document.createElement("p");
+  summary.className = "next-project-summary";
+  summary.textContent = item.summary || "No summary yet.";
+
+  const why = document.createElement("p");
+  why.className = "next-project-why";
+  why.textContent = item.why || "No rationale recorded yet.";
+
+  const nextAction = document.createElement("p");
+  nextAction.className = "next-project-action";
+  nextAction.textContent = `Next: ${item.nextAction || "Decide whether to keep, park, or start this idea."}`;
+
+  card.append(header, summary, why, nextAction);
+  return card;
+}
+
+function renderNextProjects() {
+  const items = state.nextProjects || [];
+  const hiddenCount = Math.max(items.length - NEXT_PROJECT_PREVIEW_LIMIT, 0);
+  const visibleItems = state.showAllNextProjects ? items : items.slice(0, NEXT_PROJECT_PREVIEW_LIMIT);
+
+  elements.nextProjects.hidden = items.length === 0;
+  elements.nextProjectCount.textContent = state.showAllNextProjects || hiddenCount === 0
+    ? `${items.length} ${items.length === 1 ? "idea" : "ideas"}`
+    : `Showing ${visibleItems.length} of ${items.length} ideas`;
+  elements.nextProjectList.replaceChildren(...visibleItems.map(renderNextProject));
+
+  elements.toggleNextProjects.hidden = hiddenCount === 0;
+  elements.toggleNextProjects.textContent = state.showAllNextProjects ? "Show fewer" : `Show more (${hiddenCount})`;
+}
+
+function render() {
+  const sourceLabel = sourceLabels[state.sourceFilter] || sourceLabels.all;
+  const [statusLabel, title] = statusLabels[state.statusFilter] || statusLabels.ongoing;
+  const visible = getVisibleProjects();
+  elements.viewEyebrow.textContent = `${sourceLabel} / ${statusLabel}`;
+  elements.viewTitle.textContent = title;
+  elements.lastUpdated.textContent = state.generatedAt ? `Updated ${compactDate(state.generatedAt)}` : "Not loaded";
+
+  elements.sourceTabs.forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.sourceFilter === state.sourceFilter);
+  });
+
+  elements.statusTabs.forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.statusFilter === state.statusFilter);
+  });
+
+  elements.sortTabs.forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.sortMode === state.sortMode);
+  });
+
+  renderMetrics(visible);
+  renderCompletedPanel();
+
+  const onlineProjects = ONLINE_SECTION_TABS.has(state.statusFilter)
+    ? getScopedProjects().filter(isOnlineProject).filter(matchesSearch)
+    : [];
+  renderOnlineSection(onlineProjects);
+
+  // The Online tab shows only the Online section, never the status groups.
+  if (state.statusFilter === "online") {
+    updateGroupToggle([]);
+    if (onlineProjects.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "No online projects match this view.";
+      elements.list.replaceChildren(empty);
+    } else {
+      elements.list.replaceChildren();
+    }
+    return;
+  }
+
+  updateGroupToggle(visible);
+
+  if (visible.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No projects match this view.";
+    elements.list.replaceChildren(empty);
+    return;
+  }
+
+  renderGroupedList(elements.list, visible);
+}
+
+async function loadNextProjects() {
+  const response = await fetch("/api/next-projects");
+  if (!response.ok) throw new Error(`Next project load failed: ${response.status}`);
+  const payload = await response.json();
+  state.nextProjects = Array.isArray(payload.suggestions) ? payload.suggestions : [];
+  renderNextProjects();
+}
+
+async function loadProjects({ includeHealth = false, quiet = false, force = false } = {}) {
+  if (state.loadingProjects && !force) return state.loadingProjects;
+
+  state.lastProjectLoadStartedAt = Date.now();
+  const requestVersion = state.projectLoadVersion + 1;
+  state.projectLoadVersion = requestVersion;
+  if (!quiet) elements.lastUpdated.textContent = "Loading...";
+
+  const currentLoad = (async () => {
+    const response = await fetch(`/api/projects?git=1&health=${includeHealth ? "1" : "0"}`);
+    if (!response.ok) throw new Error(`Project load failed: ${response.status}`);
+    const payload = await response.json();
+    if (requestVersion !== state.projectLoadVersion) return;
+    const incoming = payload.projects || [];
+    // Health only travels on health=1 responses; remember the last result per
+    // project so the regular polls do not blank out the Online section.
+    incoming.forEach((project) => {
+      if (project.health) state.healthById.set(projectId(project), project.health);
+    });
+    state.projects = annotateProjectRelationships(incoming).map((project) => (
+      project.health ? project : { ...project, health: state.healthById.get(projectId(project)) || null }
+    ));
+    state.generatedAt = payload.generatedAt;
+    render();
+  })();
+  state.loadingProjects = currentLoad;
+
+  try {
+    await currentLoad;
+  } finally {
+    if (state.loadingProjects === currentLoad) {
+      state.loadingProjects = null;
+    }
+  }
+}
+
+function refreshProjectsIfVisible() {
+  if (document.hidden) return;
+  loadProjects({ quiet: true }).catch((error) => {
+    showToast(error.message);
+  });
+}
+
+function refreshProjectsOnFocus() {
+  if (Date.now() - state.lastProjectLoadStartedAt < FOCUS_REFRESH_STALE_MS) return;
+  refreshProjectsIfVisible();
+}
+
+async function refreshHealth() {
+  elements.refreshHealth.disabled = true;
+  elements.refreshHealth.textContent = "Checking...";
+  try {
+    await loadProjects({ includeHealth: true, force: true });
+  } finally {
+    elements.refreshHealth.disabled = false;
+    elements.refreshHealth.textContent = "Check live sites";
+  }
+}
+
+async function syncAndLoadProjects() {
+  elements.refreshProjects.disabled = true;
+  elements.refreshProjects.textContent = "Syncing...";
+  elements.lastUpdated.textContent = "Syncing projects...";
+  try {
+    const response = await fetch("/api/sync", { method: "POST" });
+    if (!response.ok) throw new Error(`Sync failed: ${response.status}`);
+    await Promise.all([
+      loadProjects({ force: true }),
+      loadNextProjects()
+    ]);
+  } finally {
+    elements.refreshProjects.disabled = false;
+    elements.refreshProjects.textContent = "Refresh projects";
+  }
+}
+
+elements.sourceTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    state.sourceFilter = tab.dataset.sourceFilter;
+    render();
+  });
+});
+
+elements.statusTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    state.statusFilter = tab.dataset.statusFilter;
+    render();
+  });
+});
+
+elements.sortTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    state.sortMode = tab.dataset.sortMode;
+    render();
+  });
+});
+
+elements.search.addEventListener("input", (event) => {
+  state.query = event.target.value.trim();
+  render();
+});
+document.addEventListener("click", () => {
+  if (!state.activeMenuProjectId) return;
+  state.activeMenuProjectId = null;
+  render();
+});
+
+elements.refreshProjects.addEventListener("click", syncAndLoadProjects);
+elements.refreshHealth.addEventListener("click", refreshHealth);
+elements.themeToggle.addEventListener("click", () => {
+  state.theme = state.theme === "dark" ? "light" : "dark";
+  localStorage.setItem("dashboard-theme", state.theme);
+  applyTheme();
+});
+elements.toggleCompleted.addEventListener("click", () => {
+  state.showAllCompleted = !state.showAllCompleted;
+  render();
+});
+elements.toggleNextProjects.addEventListener("click", () => {
+  state.showAllNextProjects = !state.showAllNextProjects;
+  renderNextProjects();
+});
+elements.toggleGroups.addEventListener("click", () => {
+  const visible = getVisibleProjects();
+  const keys = groupKeysOf(visible);
+  const projectIds = projectIdsOf(visible);
+
+  if (allVisibleExpanded(visible)) {
+    keys.forEach((key) => state.collapsedGroups.add(key));
+    projectIds.forEach((id) => state.expandedProjects.delete(id));
+  } else {
+    keys.forEach((key) => state.collapsedGroups.delete(key));
+    projectIds.forEach((id) => state.expandedProjects.add(id));
+  }
+
+  render();
+});
+elements.backToTop.addEventListener("click", () => {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+window.addEventListener("scroll", updateBackToTop, { passive: true });
+window.addEventListener("focus", refreshProjectsOnFocus);
+document.addEventListener("visibilitychange", refreshProjectsOnFocus);
+window.setInterval(refreshProjectsIfVisible, AUTO_REFRESH_MS);
+
+applyTheme();
+updateBackToTop();
+
+loadNextProjects().catch((error) => {
+  showToast(error.message);
+});
+
+loadProjects().then(() => {
+  // Fill the Online section with real statuses without delaying first paint.
+  return loadProjects({ includeHealth: true, quiet: true, force: true });
+}).catch((error) => {
+  const empty = document.createElement("p");
+  empty.className = "empty";
+  empty.textContent = error.message;
+  elements.list.replaceChildren(empty);
+});

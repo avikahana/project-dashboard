@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Projects Dashboard</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local cockpit</p>
+          <h1>Projects Dashboard</h1>
+        </div>
+        <div class="top-actions">
+          <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="true">
+            <span class="theme-toggle-track" aria-hidden="true">
+              <span class="theme-toggle-thumb"></span>
+            </span>
+            <span id="theme-toggle-label">Dark</span>
+          </button>
+          <button class="button" id="refresh-projects" type="button" title="Sync local project files and reload the dashboard cards">Refresh projects</button>
+          <button class="button button-strong" id="refresh-health" type="button" title="Check configured liveUrl and healthCheckUrl websites">Check live sites</button>
+        </div>
+      </header>
+
+      <section class="status-strip" aria-label="Project summary">
+        <article data-tone="showing">
+          <span class="metric" id="metric-showing">0</span>
+          <span class="label">Ongoing</span>
+        </article>
+        <article data-tone="planning">
+          <span class="metric" id="metric-planning">0</span>
+          <span class="label">Planning</span>
+        </article>
+        <article data-tone="scheduled">
+          <span class="metric" id="metric-scheduled">0</span>
+          <span class="label">Scheduled</span>
+        </article>
+        <article data-tone="completed">
+          <span class="metric" id="metric-completed">0</span>
+          <span class="label">Completed</span>
+        </article>
+        <article data-tone="online">
+          <span class="metric" id="metric-online">0</span>
+          <span class="label">Online</span>
+        </article>
+        <article data-tone="review">
+          <span class="metric" id="metric-review">0</span>
+          <span class="label">Needs review</span>
+        </article>
+      </section>
+
+      <section class="control-band" aria-label="Dashboard filters">
+        <div class="filter-stack">
+          <div class="tabs source-tabs" role="tablist" aria-label="Project source filters">
+            <button class="tab source-tab" type="button" data-source-filter="claude">Claude</button>
+            <button class="tab source-tab" type="button" data-source-filter="codex">Codex</button>
+            <button class="tab source-tab is-active" type="button" data-source-filter="all">All</button>
+          </div>
+          <div class="tabs status-tabs" role="tablist" aria-label="Project status filters">
+            <button class="tab status-tab is-active" type="button" data-status-filter="all">All</button>
+            <button class="tab status-tab" type="button" data-status-filter="ongoing">Ongoing</button>
+            <button class="tab status-tab" type="button" data-status-filter="completed">Completed</button>
+            <button class="tab status-tab" type="button" data-status-filter="online">Online</button>
+            <button class="tab status-tab" type="button" data-status-filter="review">Needs review</button>
+            <button class="tab status-tab" type="button" data-status-filter="duplicates">Duplicates</button>
+          </div>
+        </div>
+        <label class="search">
+          <span>Search</span>
+          <input id="search" type="search" placeholder="Project, tag, path, repo">
+        </label>
+      </section>
+
+      <section class="board">
+        <aside class="rail" aria-label="Legend">
+          <div class="rail-line"></div>
+          <div class="legend-block">
+            <span class="legend-title">Progress</span>
+            <p>Set by hand. Milestones explain the number.</p>
+          </div>
+          <div class="legend-block">
+            <span class="legend-title">Evidence</span>
+            <p>Git, local paths, and live checks support the story.</p>
+          </div>
+          <div class="legend-block">
+            <span class="legend-title">Live health</span>
+            <p>Website or bot uptime. Separate from progress.</p>
+          </div>
+        </aside>
+
+        <div class="content">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow" id="view-eyebrow">Ongoing projects</p>
+              <h2 id="view-title">Current work</h2>
+            </div>
+            <div class="section-actions">
+              <div class="sort-tabs" role="group" aria-label="Sort projects within each group">
+                <button class="sort-tab is-active" type="button" data-sort-mode="progress">Progress</button>
+                <button class="sort-tab" type="button" data-sort-mode="updated">Updated</button>
+                <button class="sort-tab" type="button" data-sort-mode="alpha">A-Z</button>
+              </div>
+              <button class="button" id="toggle-groups" type="button">Collapse all</button>
+              <p id="last-updated" class="timestamp">Loading...</p>
+            </div>
+          </div>
+
+          <section id="online-section" class="online-section" aria-label="Online sites" hidden></section>
+
+          <div id="project-list" class="project-list" aria-live="polite"></div>
+
+          <section id="completed-panel" class="completed-panel" hidden>
+            <div class="section-head compact">
+              <div>
+                <p class="eyebrow">Completed archive</p>
+                <h2>Last done projects</h2>
+              </div>
+              <button class="button" id="toggle-completed" type="button">Show all completed</button>
+            </div>
+            <div id="completed-list" class="project-list compact-list"></div>
+          </section>
+
+          <section class="next-projects" id="next-projects" aria-label="Next project suggestions" hidden>
+            <div class="section-head compact">
+              <div>
+                <p class="eyebrow">What's next</p>
+                <h2>Project suggestions</h2>
+              </div>
+              <div class="next-project-actions">
+                <p class="timestamp" id="next-project-count">0 ideas</p>
+                <button class="button" id="toggle-next-projects" type="button" hidden>Show more</button>
+              </div>
+            </div>
+            <div class="next-project-list" id="next-project-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <button class="back-to-top" id="back-to-top" type="button" aria-label="Back to top" title="Back to top" hidden>
+      ↑
+    </button>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <template id="project-card-template">
+      <article class="project-card">
+        <div class="card-main">
+          <div class="card-title-row">
+            <div>
+              <p class="project-type"></p>
+              <h3></h3>
+            </div>
+            <div class="badge-row"></div>
+          </div>
+
+          <div class="progress-row">
+            <div class="progress-copy">
+              <span class="progress-value"></span>
+              <span class="phase"></span>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <span></span>
+            </div>
+          </div>
+
+          <p class="next-action"></p>
+          <p class="notes"></p>
+
+          <div class="milestones"></div>
+        </div>
+
+        <div class="card-side">
+          <dl class="evidence"></dl>
+          <div class="links"></div>
+        </div>
+      </article>
+    </template>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
