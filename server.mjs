@@ -2,16 +2,18 @@ import { createServer } from "node:http";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { execFile } from "node:child_process";
-import { access, readFile, stat } from "node:fs/promises";
+import { access, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mergeProjectStatusFile, syncProjects } from "./lib/project-sync.mjs";
+import { getLastRun, runAutomation, setAutomationStatus } from "./lib/automation-actions.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || "127.0.0.1";
 const CONFIG_PATH = path.join(__dirname, "data", "dashboard.config.json");
 const NEXT_PROJECTS_PATH = path.join(__dirname, "data", "next-projects.json");
+const CHECKLIST_PATH = path.join(__dirname, "data", "checklist.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 
 // Discovery + git enrichment spawn many subprocesses; cache so the 30s
@@ -255,6 +257,23 @@ function invalidateProjectsCache() {
 }
 
 async function handleApi(req, res, requestUrl) {
+  // Mutating routes are same-origin only: a hostile web page can fire blind
+  // cross-origin POSTs at localhost from the user's own browser, so reject
+  // any browser request whose Origin does not match the addressed host.
+  // Non-browser clients (curl, scripts) send no Origin and stay allowed.
+  if (req.method !== "GET" && req.headers.origin) {
+    let originHost = null;
+    try {
+      originHost = new URL(req.headers.origin).host;
+    } catch {
+      // Malformed Origin stays null and is rejected below.
+    }
+    if (!originHost || originHost !== req.headers.host) {
+      sendJson(res, 403, { error: "Cross-origin write rejected" });
+      return;
+    }
+  }
+
   if (requestUrl.pathname === "/api/sync") {
     if (req.method !== "POST") {
       sendJson(res, 405, { error: "Use POST for sync" });
@@ -308,6 +327,63 @@ async function handleApi(req, res, requestUrl) {
   if (requestUrl.pathname === "/api/next-projects") {
     const raw = await readFile(NEXT_PROJECTS_PATH, "utf8");
     sendJson(res, 200, JSON.parse(raw));
+    return;
+  }
+
+  // Scheduled card actions. The id is only ever matched against automations
+  // discovered on disk; it never reaches the filesystem or a shell.
+  const automationMatch = requestUrl.pathname.match(/^\/api\/automations\/([A-Za-z0-9._-]+)\/(pause|resume|run|last-run)$/);
+  if (automationMatch) {
+    const [, automationId, action] = automationMatch;
+
+    if (action === "last-run") {
+      if (req.method !== "GET") {
+        sendJson(res, 405, { error: "Use GET for last-run" });
+        return;
+      }
+      const result = await getLastRun(automationId);
+      if (!result) {
+        sendJson(res, 404, { error: `Unknown automation: ${automationId}` });
+        return;
+      }
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: `Use POST for ${action}` });
+      return;
+    }
+
+    if (action === "run") {
+      try {
+        const result = await runAutomation(automationId);
+        if (!result) {
+          sendJson(res, 404, { error: `Unknown automation: ${automationId}` });
+          return;
+        }
+        sendJson(res, 202, result);
+      } catch (error) {
+        if (error.code === "RUN_ACTIVE") {
+          sendJson(res, 409, { error: error.message });
+          return;
+        }
+        if (error.code === "NO_CODEX" || error.code === "NO_PROMPT") {
+          sendJson(res, 503, { error: error.message });
+          return;
+        }
+        throw error;
+      }
+      return;
+    }
+
+    const result = await setAutomationStatus(automationId, action);
+    if (!result) {
+      sendJson(res, 404, { error: `Unknown automation: ${automationId}` });
+      return;
+    }
+    invalidateProjectsCache();
+    sendJson(res, 200, result);
     return;
   }
 

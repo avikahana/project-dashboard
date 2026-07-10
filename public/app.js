@@ -30,7 +30,9 @@ const state = {
   hiddenProjects: readStoredSet(HIDDEN_PROJECTS_KEY),
   pinnedProjects: readStoredSet(PINNED_PROJECTS_KEY),
   activeMenuProjectId: null,
+  activeStatusMenuProjectId: null,
   healthById: new Map(),
+  automationRuns: new Map(),
   toastTimer: null,
   loadingProjects: null,
   projectLoadVersion: 0,
@@ -299,7 +301,7 @@ function projectRole(project) {
 
 function scheduledMeta(project) {
   if (!isScheduledProject(project)) return null;
-  return project.automation?.status || labelize(project.status || "scheduled");
+  return labelize(project.automation?.status || project.status || "scheduled");
 }
 
 function pathShortName(project) {
@@ -508,6 +510,125 @@ async function shareProjectContext(project) {
   showToast("Agent context copied");
 }
 
+function automationApiId(project) {
+  return project.source === "codex-automation" ? project.automation?.id || null : null;
+}
+
+async function postAutomationAction(project, action) {
+  const apiId = automationApiId(project);
+  const response = await fetch(`/api/automations/${encodeURIComponent(apiId)}/${action}`, { method: "POST" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `${action} failed: ${response.status}`);
+  return payload;
+}
+
+async function refreshAutomationRuns() {
+  const automationProjects = state.projects.filter((project) => automationApiId(project));
+  if (automationProjects.length === 0) return;
+
+  await Promise.all(automationProjects.map(async (project) => {
+    try {
+      const response = await fetch(`/api/automations/${encodeURIComponent(automationApiId(project))}/last-run`);
+      if (!response.ok) return;
+      const payload = await response.json();
+      state.automationRuns.set(projectId(project), payload.run || null);
+    } catch {
+      // Keep the previous run state when the server is briefly unreachable.
+    }
+  }));
+  render();
+}
+
+function automationStatusLabel(project) {
+  return String(project.automation?.status || "").toUpperCase() === "PAUSED" ? "Paused" : "Active";
+}
+
+function createStatusDropdown(project) {
+  const id = projectId(project);
+  const current = automationStatusLabel(project);
+  const open = state.activeStatusMenuProjectId === id;
+
+  const wrap = document.createElement("span");
+  wrap.className = "status-menu-wrap";
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = `badge badge-button ${statusClass(current)}`.trim();
+  toggle.textContent = `Status: ${current} ▾`;
+  toggle.title = "Change this automation's schedule status";
+  toggle.setAttribute("aria-haspopup", "menu");
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    state.activeStatusMenuProjectId = open ? null : id;
+    state.activeMenuProjectId = null;
+    render();
+  });
+  wrap.append(toggle);
+
+  if (open) {
+    const menu = document.createElement("div");
+    menu.className = "row-menu";
+    menu.setAttribute("role", "menu");
+    menu.addEventListener("click", (event) => event.stopPropagation());
+
+    // Only statuses the automation can switch TO: the current one is already
+    // the toggle itself, so it never repeats inside the menu.
+    ["Active", "Paused"].filter((option) => option !== current).forEach((option) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.setAttribute("role", "menuitem");
+      item.textContent = option;
+      item.addEventListener("click", async () => {
+        state.activeStatusMenuProjectId = null;
+        render();
+        try {
+          await postAutomationAction(project, option === "Paused" ? "pause" : "resume");
+          showToast(option === "Paused" ? "Schedule paused" : "Schedule resumed");
+          await loadProjects({ force: true });
+        } catch (error) {
+          showToast(error.message);
+        }
+      });
+      menu.append(item);
+    });
+    wrap.append(menu);
+  }
+
+  return wrap;
+}
+
+function createRunButton(project, run) {
+  const running = run?.status === "running";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "link-pill";
+  button.textContent = running ? "Running..." : run ? "Run again" : "Run now";
+  button.disabled = running;
+  button.title = describeAutomationRun(run);
+  button.addEventListener("click", async () => {
+    if (!window.confirm(`Run "${project.name}" now via codex exec?`)) return;
+    button.disabled = true;
+    button.textContent = "Starting...";
+    try {
+      await postAutomationAction(project, "run");
+      showToast("Run started");
+    } catch (error) {
+      showToast(error.message);
+    }
+    refreshAutomationRuns();
+  });
+  return button;
+}
+
+function describeAutomationRun(run) {
+  if (!run) return "Never triggered";
+  if (run.status === "running") return `Running since ${compactDate(run.startedAt)}`;
+  if (run.status === "finished-untracked") return `Finished, outcome untracked (started ${compactDate(run.startedAt)})`;
+  const outcome = run.status === "succeeded" ? "Succeeded" : "Failed";
+  return `${outcome} ${compactDate(run.finishedAt || run.startedAt)}`;
+}
+
 function renderProject(project) {
   const node = elements.template.content.firstElementChild.cloneNode(true);
   const progress = Number.isFinite(project.progress) ? project.progress : null;
@@ -520,11 +641,17 @@ function renderProject(project) {
   node.querySelector("h3").textContent = project.name;
 
   const badges = node.querySelector(".badge-row");
-  badges.append(createBadge(`Status: ${labelize(project.status)}`, statusClass(project.status), "Current workflow state for this project"));
+  if (automationApiId(project)) {
+    badges.append(createStatusDropdown(project));
+  } else {
+    badges.append(createBadge(`Status: ${labelize(project.status)}`, statusClass(project.status), "Current workflow state for this project"));
+  }
   badges.append(createBadge(project.confidence ? `Confidence: ${labelize(project.confidence)}` : "Confidence: Unknown", project.confidence === "low" ? "review" : "", "How sure the dashboard seed data is"));
   badges.append(createBadge(projectRole(project), "", "What role this tracked project plays"));
   badges.append(createBadge(sourceLabel(project), "", "Dashboard source root for this card"));
   if (healthStatus) badges.append(createBadge(`Health: ${healthStatus}`, statusClass(healthStatus), "Live website or bot health, separate from progress"));
+  const automationRun = automationApiId(project) ? state.automationRuns.get(projectId(project)) : null;
+  if (automationRun?.status === "running") badges.append(createBadge("Manual run: Running", "active", "A dashboard-triggered codex exec run is in progress"));
   if (project.nameCollision) badges.append(createBadge("Same name", "review", `Also tracked as ${project.nameCollision.homes.join("; ")}`));
   if (project.sourceCollision) badges.append(createBadge("Same source", "review", "Multiple dashboard records point at the same status file or local path"));
   if (projectNeedsReview(project)) badges.append(createBadge("Review needed", "review", "Some project fields are missing, uncertain, or need confirmation"));
@@ -565,6 +692,7 @@ function renderProject(project) {
     appendEvidence(evidence, "Schedule", project.automation.schedule, "When this automation is configured to run");
     appendEvidence(evidence, "Kind", labelize(project.automation.kind || "automation"), "Automation type");
     appendEvidence(evidence, "Model", project.automation.model, "Model configured for this scheduled run");
+    appendEvidence(evidence, "Manual run", describeAutomationRun(automationRun), "Latest run triggered from this dashboard via codex exec");
   }
   appendEvidence(evidence, "Source", sourceLabel(project), "Dashboard source root that discovered this project");
   appendEvidence(evidence, "Folder", project.localPathFound ? "Found" : project.localPath ? "Missing" : "Not set", "Whether the configured localPath exists on this Mac");
@@ -578,6 +706,7 @@ function renderProject(project) {
   appendEvidence(evidence, "Completed", project.completedAt || "Not completed", "Completion date from the dashboard config");
 
   const links = node.querySelector(".links");
+  if (automationApiId(project)) links.append(createRunButton(project, automationRun));
   if (project.projectHome || project.localPath) links.append(createCopyButton("Copy home", project.projectHome || project.localPath));
   if (project.repoPath) links.append(createCopyButton("Copy repo", project.repoPath));
   if (repoUrl) links.append(createLink("Repo", repoUrl));
@@ -656,6 +785,13 @@ function renderCompactRow(project) {
     flag.className = "row-flag";
     flag.title = "Needs review";
     flag.textContent = "review";
+    trigger.append(flag);
+  }
+  if (automationApiId(project) && state.automationRuns.get(id)?.status === "running") {
+    const flag = document.createElement("span");
+    flag.className = "row-flag";
+    flag.title = "A dashboard-triggered run is in progress";
+    flag.textContent = "running";
     trigger.append(flag);
   }
 
@@ -1152,6 +1288,7 @@ async function loadProjects({ includeHealth = false, quiet = false, force = fals
     ));
     state.generatedAt = payload.generatedAt;
     render();
+    refreshAutomationRuns().catch(() => {});
   })();
   state.loadingProjects = currentLoad;
 
@@ -1230,8 +1367,9 @@ elements.search.addEventListener("input", (event) => {
   render();
 });
 document.addEventListener("click", () => {
-  if (!state.activeMenuProjectId) return;
+  if (!state.activeMenuProjectId && !state.activeStatusMenuProjectId) return;
   state.activeMenuProjectId = null;
+  state.activeStatusMenuProjectId = null;
   render();
 });
 
