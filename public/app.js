@@ -24,6 +24,7 @@ const state = {
   showAllNextProjects: false,
   generatedAt: null,
   nextProjects: [],
+  checklist: { title: "Checklist", description: "", items: [] },
   theme: localStorage.getItem("dashboard-theme") || "dark",
   collapsedGroups: new Set(),
   expandedProjects: new Set(),
@@ -48,6 +49,11 @@ const elements = {
   nextProjectList: document.querySelector("#next-project-list"),
   nextProjectCount: document.querySelector("#next-project-count"),
   toggleNextProjects: document.querySelector("#toggle-next-projects"),
+  checklistPanel: document.querySelector("#checklist-panel"),
+  checklistSummary: document.querySelector("#checklist-summary"),
+  checklistDescription: document.querySelector("#checklist-description"),
+  checklistBar: document.querySelector("#checklist-bar"),
+  checklistGroups: document.querySelector("#checklist-groups"),
   template: document.querySelector("#project-card-template"),
   search: document.querySelector("#search"),
   sourceTabs: [...document.querySelectorAll(".source-tab")],
@@ -92,7 +98,8 @@ const statusLabels = {
   completed: ["Completed", "Done and discoverable"],
   online: ["Online", "Configured live sites"],
   review: ["Needs review", "Unknowns to clean up"],
-  duplicates: ["Duplicates", "Name or source collisions"]
+  duplicates: ["Duplicates", "Name or source collisions"],
+  checklist: ["Checklist", "Personal checklist"]
 };
 
 const sourceDisplayLabels = {
@@ -1201,6 +1208,147 @@ function renderNextProjects() {
   elements.toggleNextProjects.textContent = state.showAllNextProjects ? "Show fewer" : `Show more (${hiddenCount})`;
 }
 
+function matchesChecklistSearch(item) {
+  if (!state.query) return true;
+  const haystack = [item.title, item.detail, item.group, item.source]
+    .filter(Boolean).join(" ").toLowerCase();
+  return haystack.includes(state.query.toLowerCase());
+}
+
+async function toggleChecklistItem(item, checkbox) {
+  checkbox.disabled = true;
+  try {
+    const response = await fetch(`/api/checklist/items/${encodeURIComponent(item.id)}/toggle`, { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `Toggle failed: ${response.status}`);
+    item.done = payload.item.done;
+    item.doneAt = payload.item.doneAt;
+    showToast(item.done ? "Checked off" : "Reopened");
+  } catch (error) {
+    showToast(error.message);
+    loadChecklist().catch(() => {});
+  }
+  renderChecklist();
+}
+
+function renderChecklistItem(item) {
+  const row = document.createElement("label");
+  row.className = "check-row";
+  if (item.done) row.classList.add("is-done");
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "check-box";
+  checkbox.checked = Boolean(item.done);
+  checkbox.addEventListener("change", () => toggleChecklistItem(item, checkbox));
+
+  const body = document.createElement("span");
+  body.className = "check-body";
+
+  const title = document.createElement("span");
+  title.className = "check-title";
+  title.textContent = item.title;
+
+  const detail = document.createElement("span");
+  detail.className = "check-detail";
+  detail.textContent = item.detail || "";
+
+  const meta = document.createElement("span");
+  meta.className = "check-meta";
+  meta.textContent = [
+    item.source ? `From: ${item.source}` : null,
+    item.done && item.doneAt ? `Done ${compactDate(item.doneAt)}` : null
+  ].filter(Boolean).join(" / ");
+
+  body.append(title);
+  if (item.detail) body.append(detail);
+  if (meta.textContent) body.append(meta);
+
+  row.append(checkbox, body);
+
+  if (item.link) {
+    const actions = document.createElement("span");
+    actions.className = "check-actions";
+    actions.append(createCopyButton("Copy doc path", item.link));
+    // Clicking the copy button must not toggle the wrapping label's checkbox.
+    actions.addEventListener("click", (event) => event.preventDefault());
+    row.append(actions);
+  }
+
+  return row;
+}
+
+function renderChecklist() {
+  const items = state.checklist.items || [];
+  const doneCount = items.filter((item) => item.done).length;
+  const visible = items.filter(matchesChecklistSearch);
+
+  elements.checklistSummary.textContent = items.length === 0
+    ? "No checklist items yet. Add them to data/checklist.json."
+    : `${state.checklist.title || "Checklist"}: ${doneCount} of ${items.length} done`;
+  elements.checklistBar.style.setProperty(
+    "--progress-width",
+    items.length === 0 ? "0%" : `${Math.round((doneCount / items.length) * 100)}%`
+  );
+  elements.checklistDescription.hidden = !state.checklist.description;
+  elements.checklistDescription.textContent = state.checklist.description || "";
+
+  const groups = new Map();
+  visible.forEach((item) => {
+    const key = item.group || "Items";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  });
+
+  const fragments = [...groups.entries()].map(([key, groupItems]) => {
+    const section = document.createElement("section");
+    section.className = "check-group";
+
+    const head = document.createElement("div");
+    head.className = "group-head check-group-head";
+
+    const name = document.createElement("span");
+    name.className = "group-name";
+    name.textContent = key;
+
+    const count = document.createElement("span");
+    count.className = "group-count";
+    count.textContent = `${groupItems.filter((item) => item.done).length}/${groupItems.length}`;
+
+    head.append(name, count);
+    const body = document.createElement("div");
+    body.className = "check-group-body";
+    body.append(...groupItems.map(renderChecklistItem));
+
+    section.append(head, body);
+    return section;
+  });
+
+  if (fragments.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = items.length === 0
+      ? "This checklist is empty."
+      : "No checklist items match this search.";
+    elements.checklistGroups.replaceChildren(empty);
+    return;
+  }
+
+  elements.checklistGroups.replaceChildren(...fragments);
+}
+
+async function loadChecklist() {
+  const response = await fetch("/api/checklist");
+  if (!response.ok) throw new Error(`Checklist load failed: ${response.status}`);
+  const payload = await response.json();
+  state.checklist = {
+    title: payload.title || "Checklist",
+    description: payload.description || "",
+    items: Array.isArray(payload.items) ? payload.items : []
+  };
+  if (state.statusFilter === "checklist") renderChecklist();
+}
+
 function render() {
   const sourceLabel = sourceLabels[state.sourceFilter] || sourceLabels.all;
   const [statusLabel, title] = statusLabels[state.statusFilter] || statusLabels.ongoing;
@@ -1223,6 +1371,16 @@ function render() {
 
   renderMetrics(visible);
   renderCompletedPanel();
+
+  // The Checklist tab replaces the project list entirely.
+  elements.checklistPanel.hidden = state.statusFilter !== "checklist";
+  if (state.statusFilter === "checklist") {
+    renderOnlineSection([]);
+    updateGroupToggle([]);
+    elements.list.replaceChildren();
+    renderChecklist();
+    return;
+  }
 
   const onlineProjects = ONLINE_SECTION_TABS.has(state.statusFilter)
     ? getScopedProjects().filter(isOnlineProject).filter(matchesSearch)
@@ -1415,6 +1573,10 @@ applyTheme();
 updateBackToTop();
 
 loadNextProjects().catch((error) => {
+  showToast(error.message);
+});
+
+loadChecklist().catch((error) => {
   showToast(error.message);
 });
 

@@ -68,6 +68,7 @@
             <button class="tab status-tab" type="button" data-status-filter="online">Online</button>
             <button class="tab status-tab" type="button" data-status-filter="review">Needs review</button>
             <button class="tab status-tab" type="button" data-status-filter="duplicates">Duplicates</button>
+            <button class="tab status-tab" type="button" data-status-filter="checklist">Checklist</button>
           </div>
         </div>
         <label class="search">
@@ -111,6 +112,17 @@
           </div>
 
           <div id="project-list" class="project-list" aria-live="polite"></div>
+
+          <section id="checklist-panel" class="checklist-panel" aria-label="Checklist" hidden>
+            <div class="checklist-head">
+              <p class="checklist-summary" id="checklist-summary">No checklist items yet.</p>
+              <div class="progress-track checklist-track" aria-hidden="true">
+                <span id="checklist-bar"></span>
+              </div>
+            </div>
+            <p class="checklist-description" id="checklist-description" hidden></p>
+            <div id="checklist-groups" class="checklist-groups"></div>
+          </section>
 
           <section id="completed-panel" class="completed-panel" hidden>
             <div class="section-head compact">

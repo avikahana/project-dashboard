@@ -70,6 +70,19 @@ async function pathExists(localPath) {
   }
 }
 
+// A missing checklist file behaves as an empty checklist so fresh clones
+// (data/ is gitignored) render the tab without errors.
+async function readChecklist() {
+  try {
+    return JSON.parse(await readFile(CHECKLIST_PATH, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { title: "Checklist", updatedAt: null, items: [] };
+    }
+    throw error;
+  }
+}
+
 async function readConfig() {
   const raw = await readFile(CONFIG_PATH, "utf8");
   const parsed = JSON.parse(raw);
@@ -327,6 +340,37 @@ async function handleApi(req, res, requestUrl) {
   if (requestUrl.pathname === "/api/next-projects") {
     const raw = await readFile(NEXT_PROJECTS_PATH, "utf8");
     sendJson(res, 200, JSON.parse(raw));
+    return;
+  }
+
+  if (requestUrl.pathname === "/api/checklist") {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { error: "Use GET for checklist" });
+      return;
+    }
+    sendJson(res, 200, await readChecklist());
+    return;
+  }
+
+  // Toggle one checklist item. The id is only matched against items already
+  // in the checklist file; it never reaches the filesystem or a shell.
+  const checklistMatch = requestUrl.pathname.match(/^\/api\/checklist\/items\/([A-Za-z0-9._-]+)\/toggle$/);
+  if (checklistMatch) {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "Use POST for toggle" });
+      return;
+    }
+    const checklist = await readChecklist();
+    const item = (checklist.items || []).find((candidate) => candidate.id === checklistMatch[1]);
+    if (!item) {
+      sendJson(res, 404, { error: `Unknown checklist item: ${checklistMatch[1]}` });
+      return;
+    }
+    item.done = !item.done;
+    item.doneAt = item.done ? new Date().toISOString() : null;
+    checklist.updatedAt = new Date().toISOString();
+    await writeFile(CHECKLIST_PATH, JSON.stringify(checklist, null, 2) + "\n", "utf8");
+    sendJson(res, 200, { updatedAt: checklist.updatedAt, item });
     return;
   }
 
