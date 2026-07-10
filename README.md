@@ -2,6 +2,12 @@
 
 A local dashboard for tracking active projects, completed projects, local folders, repos, and online health.
 
+![Projects Dashboard board view](docs/screenshot-dashboard.png)
+
+Each project expands into a full card with progress, next action, milestones, and git evidence:
+
+![Expanded project card](docs/screenshot-project-card.png)
+
 ## Run
 
 ```bash
