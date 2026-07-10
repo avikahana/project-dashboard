@@ -745,11 +745,15 @@ html[data-theme="light"] .theme-toggle-thumb {
   color: var(--muted);
 }
 
-/* Online section: availability cards rendered above the status groups. */
+/* Online section: full-width availability strip rendered directly under the status metrics. */
 .online-section {
   display: grid;
   gap: 6px;
-  margin-bottom: 14px;
+  margin: 0 0 24px;
+}
+
+.online-section[hidden] {
+  display: none;
 }
 
 .online-section .group-head {
@@ -758,8 +762,10 @@ html[data-theme="light"] .theme-toggle-thumb {
 
 .online-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 8px;
+  /* Spread like the status strip: cards stretch to fill the row, then wrap to a
+     new line instead of shrinking below a comfortable width when there are more. */
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
 }
 
 .online-card {
