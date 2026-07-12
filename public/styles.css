@@ -4,6 +4,7 @@
   --ink: #f2f0e8;
   --muted: #a6a092;
   --line: #303644;
+  --line-strong: #4d5668;
   --panel: #171b24;
   --panel-soft: #222834;
   --cobalt: #82a3ff;
@@ -25,6 +26,7 @@ html[data-theme="light"] {
   --ink: #1c1b18;
   --muted: #6e6a61;
   --line: #d9d3c7;
+  --line-strong: #b0a894;
   --panel: #ffffff;
   --panel-soft: #efede4;
   --cobalt: #2557d6;
@@ -79,6 +81,14 @@ a:focus-visible {
 .badge-row {
   display: flex;
   align-items: center;
+}
+
+/* The flex display above overrides the [hidden] attribute, so restore it for
+   the panels the view tabs toggle: filters + list head belong to Tracked
+   projects only. */
+.control-band[hidden],
+.section-head[hidden] {
+  display: none;
 }
 
 .topbar {
@@ -284,56 +294,19 @@ html[data-theme="light"] .theme-toggle-thumb {
   display: none;
 }
 
-.next-projects .section-head.compact {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: 0;
-}
-
-.next-project-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
+/* Suggestions render as compact rows, same list look as the tracked projects. */
 .next-project-list {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 4px;
 }
 
-.next-project-card {
+.next-projects > .button {
+  margin-top: 10px;
+}
+
+.next-project-detail {
   display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-left: 5px solid var(--violet);
-  border-radius: 8px;
-  background: var(--panel);
-}
-
-.next-project-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.next-project-header h3 {
-  margin: 0;
-  font-size: 1rem;
-  line-height: 1.2;
-}
-
-.next-project-meta {
-  margin: 5px 0 0;
-  color: var(--muted);
-  font-size: 0.74rem;
-  font-weight: 800;
-  text-transform: uppercase;
+  gap: 8px;
 }
 
 .next-project-summary,
@@ -359,6 +332,22 @@ html[data-theme="light"] .theme-toggle-thumb {
   justify-content: space-between;
   gap: 18px;
   margin-bottom: 22px;
+}
+
+/* Scheduled tab source strip: same boxed source tabs as the tracked filters,
+   but standalone, so no divider line under the buttons. */
+.scheduled-band {
+  display: flex;
+  margin-bottom: 22px;
+}
+
+.scheduled-band[hidden] {
+  display: none;
+}
+
+.scheduled-band .source-tabs {
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .tabs {
@@ -437,11 +426,15 @@ html[data-theme="light"] .theme-toggle-thumb {
   color: var(--ink);
 }
 
+/* Section dividers: a horizontal line under the Online strip and a vertical
+   line between the rail and the content, visible in dark and light mode. */
 .board {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   gap: 24px;
   align-items: start;
+  border-top: 1px solid var(--line-strong);
+  padding-top: 24px;
 }
 
 .rail {
@@ -452,30 +445,31 @@ html[data-theme="light"] .theme-toggle-thumb {
   padding-top: 9px;
 }
 
-.rail-line {
-  width: 100%;
-  height: 8px;
-  min-height: 8px;
-  background:
-    linear-gradient(90deg, var(--cobalt) 0 34%, transparent 34% 37%),
-    linear-gradient(90deg, transparent 0 37%, var(--teal) 37% 67%, transparent 67% 70%),
-    linear-gradient(90deg, transparent 0 70%, var(--violet) 70% 100%);
-  border-radius: 99px;
+.view-nav {
+  display: grid;
+  gap: 8px;
 }
 
-.legend-block {
-  margin-bottom: 22px;
-}
-
-.legend-block p {
-  margin: 6px 0 0;
+.view-tab {
+  min-height: 44px;
+  text-align: left;
   color: var(--muted);
-  font-size: 0.88rem;
-  line-height: 1.45;
+}
+
+.view-tab:hover {
+  color: var(--ink);
+}
+
+.view-tab.is-active {
+  background: var(--cobalt);
+  border-color: var(--cobalt);
+  color: #fff;
 }
 
 .content {
   min-width: 0;
+  border-left: 1px solid var(--line-strong);
+  padding-left: 24px;
 }
 
 .section-head {
@@ -854,6 +848,34 @@ html[data-theme="light"] .theme-toggle-thumb {
   font-size: 0.76rem;
 }
 
+/* Online tab body: compact rows, same list look as What's next (same section
+   frame and row spacing); the row detail keeps the full per-site facts.
+   Rows are toned by live health. */
+.online-detail-list {
+  display: grid;
+  gap: 4px;
+  margin: 28px 0 0;
+  padding: 18px 0 22px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.online-detail {
+  display: grid;
+  gap: 10px;
+}
+
+.compact-row[data-tone="up"] { border-left-color: var(--green); }
+.compact-row[data-tone="reachable"] { border-left-color: var(--amber); }
+.compact-row[data-tone="down"] { border-left-color: var(--red); }
+.compact-row[data-tone="up"] .row-dot { background: var(--green); }
+.compact-row[data-tone="reachable"] .row-dot { background: var(--amber); }
+.compact-row[data-tone="down"] .row-dot { background: var(--red); }
+
+.online-detail-facts {
+  margin: 2px 0 0;
+}
+
 button.link-pill {
   font: inherit;
   font-size: 0.82rem;
@@ -999,6 +1021,27 @@ button.link-pill:disabled {
   padding-right: 8px;
 }
 
+/* Automation Run/status controls surfaced on the collapsed row head. */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding-right: 6px;
+}
+
+/* Fixed slots so "Run now" / "Run again" / "Running..." and the status badge
+   line up as columns across rows. */
+.row-actions .link-pill {
+  min-width: 96px;
+  justify-content: center;
+}
+
+.row-actions .status-menu-wrap .badge-button {
+  min-width: 118px;
+  justify-content: center;
+}
+
 .row-menu-button {
   display: grid;
   place-items: center;
@@ -1079,8 +1122,18 @@ button.link-pill:disabled {
 .compact-row.is-pinned .row-dot { background: var(--amber); }
 .compact-row.is-private .row-dot { background: var(--violet); }
 
-.row-name {
+/* Title zone absorbs the free space so the right-hand columns (path, meta,
+   actions, menu) keep the same x-position on every row. */
+.row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: 1 1 auto;
+  min-width: 0;
+}
+
+.row-name {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1102,14 +1155,17 @@ button.link-pill:disabled {
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 800;
+  text-align: right;
 }
 
 .row-meta {
   flex: none;
+  min-width: 64px;
   color: var(--muted);
   font-size: 0.86rem;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .row-meta.is-unknown {
@@ -1142,19 +1198,22 @@ button.link-pill:disabled {
     grid-template-columns: 1fr;
   }
 
-  .next-project-list {
-    grid-template-columns: 1fr;
-  }
-
   .rail {
     position: static;
     grid-template-columns: 1fr;
   }
 
-  .rail-line {
-    width: 100%;
-    min-height: 6px;
-    height: 6px;
+  .content {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .view-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .view-tab {
+    text-align: center;
   }
 
   .card-side {
@@ -1213,15 +1272,6 @@ button.link-pill:disabled {
     padding: 14px;
   }
 
-  .next-project-actions {
-    justify-content: stretch;
-  }
-
-  .next-project-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .back-to-top {
     right: 14px;
     bottom: 14px;
@@ -1261,42 +1311,6 @@ button.link-pill:disabled {
   }
 }
 
-.checklist-panel {
-  display: grid;
-  gap: 14px;
-}
-
-.checklist-head {
-  display: grid;
-  gap: 8px;
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
-}
-
-.checklist-summary {
-  margin: 0;
-  font-weight: 760;
-}
-
-.checklist-track {
-  height: 10px;
-}
-
-.checklist-description {
-  margin: 0;
-  padding: 0 4px;
-  color: var(--muted);
-  font-size: 0.86rem;
-}
-
-.checklist-groups {
-  display: grid;
-  gap: 14px;
-}
-
 .check-group {
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -1305,11 +1319,20 @@ button.link-pill:disabled {
 }
 
 .check-group-head {
-  cursor: default;
+  cursor: pointer;
   color: var(--cobalt);
   border-bottom: 1px solid var(--line);
+  border-radius: 0;
   background: var(--panel-soft);
   padding: 8px 12px;
+}
+
+.check-group-head[aria-expanded="false"] {
+  border-bottom: 0;
+}
+
+.checklists-view {
+  margin-top: 28px;
 }
 
 .check-group-body {
@@ -1357,16 +1380,6 @@ button.link-pill:disabled {
   font-size: 0.86rem;
 }
 
-.check-meta {
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.check-actions {
-  margin-left: auto;
-  flex: none;
-}
-
 .check-row.is-done .check-title {
   color: var(--muted);
   text-decoration: line-through;
@@ -1374,4 +1387,28 @@ button.link-pill:disabled {
 
 .check-row.is-done .check-detail {
   opacity: 0.7;
+}
+
+.check-toggle {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.check-toggle .check-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.check-toggle .row-chevron {
+  font-size: 0.85rem;
+}
+
+.check-row.is-open .row-chevron {
+  transform: rotate(90deg);
 }

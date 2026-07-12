@@ -1,5 +1,6 @@
 const HIDDEN_PROJECTS_KEY = "dashboard-hidden-projects";
 const PINNED_PROJECTS_KEY = "dashboard-pinned-projects";
+const CHECKED_NEXT_STEPS_KEY = "dashboard-checked-next-steps";
 const AUTO_REFRESH_MS = 30000;
 const FOCUS_REFRESH_STALE_MS = 5000;
 const MAX_VISIBLE_MILESTONES = 12;
@@ -16,7 +17,9 @@ function readStoredSet(key) {
 
 const state = {
   projects: [],
+  view: localStorage.getItem("dashboard-view") || "projects",
   sourceFilter: "all",
+  scheduledSource: "all",
   statusFilter: "all",
   sortMode: "progress",
   query: "",
@@ -24,12 +27,16 @@ const state = {
   showAllNextProjects: false,
   generatedAt: null,
   nextProjects: [],
-  checklist: { title: "Checklist", description: "", items: [] },
   theme: localStorage.getItem("dashboard-theme") || "dark",
   collapsedGroups: new Set(),
+  nextStepsCollapsed: false,
+  expandedNextSteps: new Set(),
   expandedProjects: new Set(),
+  expandedNextProjects: new Set(),
+  expandedOnlineProjects: new Set(),
   hiddenProjects: readStoredSet(HIDDEN_PROJECTS_KEY),
   pinnedProjects: readStoredSet(PINNED_PROJECTS_KEY),
+  checkedNextSteps: readStoredSet(CHECKED_NEXT_STEPS_KEY),
   activeMenuProjectId: null,
   activeStatusMenuProjectId: null,
   healthById: new Map(),
@@ -47,16 +54,16 @@ const elements = {
   completedList: document.querySelector("#completed-list"),
   nextProjects: document.querySelector("#next-projects"),
   nextProjectList: document.querySelector("#next-project-list"),
-  nextProjectCount: document.querySelector("#next-project-count"),
   toggleNextProjects: document.querySelector("#toggle-next-projects"),
-  checklistPanel: document.querySelector("#checklist-panel"),
-  checklistSummary: document.querySelector("#checklist-summary"),
-  checklistDescription: document.querySelector("#checklist-description"),
-  checklistBar: document.querySelector("#checklist-bar"),
-  checklistGroups: document.querySelector("#checklist-groups"),
   template: document.querySelector("#project-card-template"),
   search: document.querySelector("#search"),
+  controlBand: document.querySelector(".control-band"),
+  scheduledBand: document.querySelector("#scheduled-band"),
+  projectsHead: document.querySelector("#projects-head"),
+  checklistsView: document.querySelector("#checklists-view"),
+  viewTabs: [...document.querySelectorAll(".view-tab")],
   sourceTabs: [...document.querySelectorAll(".source-tab")],
+  scheduledSourceTabs: [...document.querySelectorAll(".scheduled-source-tab")],
   statusTabs: [...document.querySelectorAll(".status-tab")],
   sortTabs: [...document.querySelectorAll(".sort-tab")],
   refreshProjects: document.querySelector("#refresh-projects"),
@@ -96,10 +103,8 @@ const statusLabels = {
   all: ["All", "Every tracked project"],
   ongoing: ["Ongoing", "Current work"],
   completed: ["Completed", "Done and discoverable"],
-  online: ["Online", "Configured live sites"],
   review: ["Needs review", "Unknowns to clean up"],
-  duplicates: ["Duplicates", "Name or source collisions"],
-  checklist: ["Checklist", "Personal checklist"]
+  duplicates: ["Duplicates", "Name or source collisions"]
 };
 
 const sourceDisplayLabels = {
@@ -112,7 +117,6 @@ const sourceDisplayLabels = {
 const PRIVATE_GROUP_KEY = "private-list";
 const PINNED_GROUP_KEY = "pinned-projects";
 const GROUP_ORDER = [PINNED_GROUP_KEY, "active", "scheduled", "building", "maintenance", "planning", "paused", "blocked", "completed", PRIVATE_GROUP_KEY];
-const ONLINE_GROUP_KEY = "online";
 
 function isScheduledProject(project) {
   const tags = new Set((project.tags || []).map((tag) => String(tag).toLowerCase()));
@@ -175,6 +179,10 @@ function saveHiddenProjects() {
 
 function savePinnedProjects() {
   localStorage.setItem(PINNED_PROJECTS_KEY, JSON.stringify([...state.pinnedProjects]));
+}
+
+function saveCheckedNextSteps() {
+  localStorage.setItem(CHECKED_NEXT_STEPS_KEY, JSON.stringify([...state.checkedNextSteps]));
 }
 
 function updateBackToTop() {
@@ -252,11 +260,27 @@ function matchesSource(project) {
   return true;
 }
 
+// Scheduled tasks come from two runners: Claude scheduled tasks carry a
+// claude-task marker (source, tag, or automation kind), Codex automations
+// carry source codex-automation.
+function scheduledTaskSource(project) {
+  const tags = (project.tags || []).map((tag) => String(tag).toLowerCase());
+  if (project.source === "claude-task" || tags.includes("claude-task") || project.automation?.kind === "claude-task") return "claude";
+  if (project.source === "codex-automation" || project.automationFile || project.automation) return "codex";
+  if (isClaudeProject(project)) return "claude";
+  if (isCodexProject(project)) return "codex";
+  return null;
+}
+
+function matchesScheduledSource(project) {
+  if (state.scheduledSource === "all") return true;
+  return scheduledTaskSource(project) === state.scheduledSource;
+}
+
 function matchesStatus(project) {
   if (state.statusFilter === "all") return true;
   if (state.statusFilter === "ongoing") return isOngoing(project);
   if (state.statusFilter === "completed") return statusClass(project.status) === "completed";
-  if (state.statusFilter === "online") return isOnlineProject(project);
   if (state.statusFilter === "review") return projectNeedsReview(project);
   if (state.statusFilter === "duplicates") return Boolean(project.nameCollision || project.sourceCollision);
   return true;
@@ -286,7 +310,7 @@ function labelize(value) {
 }
 
 function sourceLabel(project) {
-  if (project.source === "codex-automation") return "Scheduled";
+  if (project.source === "codex-automation" || project.source === "claude-task") return "Scheduled";
   return sourceDisplayLabels[project.source] || labelize(project.source || project.type || "unknown");
 }
 
@@ -308,7 +332,9 @@ function projectRole(project) {
 
 function scheduledMeta(project) {
   if (!isScheduledProject(project)) return null;
-  return labelize(project.automation?.status || project.status || "scheduled");
+  // automation.status is the raw TOML literal (e.g. "ACTIVE") and labelize
+  // never lowercases, so normalize case here.
+  return labelize(String(project.automation?.status || project.status || "scheduled").toLowerCase());
 }
 
 function pathShortName(project) {
@@ -518,12 +544,24 @@ async function shareProjectContext(project) {
 }
 
 function automationApiId(project) {
-  return project.source === "codex-automation" ? project.automation?.id || null : null;
+  // Any card carrying automation metadata is controllable: Codex automations
+  // and Claude scheduled tasks share the same /api/automations endpoints.
+  return project.automation?.id || null;
+}
+
+// The two runners share one id namespace on the API, so every call carries a
+// runner hint; without it a Codex automation with the same id would shadow
+// the Claude task (or the other way around).
+function automationRunner(project) {
+  return project.automation?.kind === "claude-task" ? "claude" : "codex";
+}
+
+function automationActionUrl(project, action) {
+  return `/api/automations/${encodeURIComponent(automationApiId(project))}/${action}?runner=${automationRunner(project)}`;
 }
 
 async function postAutomationAction(project, action) {
-  const apiId = automationApiId(project);
-  const response = await fetch(`/api/automations/${encodeURIComponent(apiId)}/${action}`, { method: "POST" });
+  const response = await fetch(automationActionUrl(project, action), { method: "POST" });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || `${action} failed: ${response.status}`);
   return payload;
@@ -535,7 +573,7 @@ async function refreshAutomationRuns() {
 
   await Promise.all(automationProjects.map(async (project) => {
     try {
-      const response = await fetch(`/api/automations/${encodeURIComponent(automationApiId(project))}/last-run`);
+      const response = await fetch(automationActionUrl(project, "last-run"));
       if (!response.ok) return;
       const payload = await response.json();
       state.automationRuns.set(projectId(project), payload.run || null);
@@ -614,7 +652,8 @@ function createRunButton(project, run) {
   button.disabled = running;
   button.title = describeAutomationRun(run);
   button.addEventListener("click", async () => {
-    if (!window.confirm(`Run "${project.name}" now via codex exec?`)) return;
+    const runnerLabel = automationRunner(project) === "claude" ? "the Claude Code CLI" : "codex exec";
+    if (!window.confirm(`Run "${project.name}" now via ${runnerLabel}?`)) return;
     button.disabled = true;
     button.textContent = "Starting...";
     try {
@@ -658,7 +697,7 @@ function renderProject(project) {
   badges.append(createBadge(sourceLabel(project), "", "Dashboard source root for this card"));
   if (healthStatus) badges.append(createBadge(`Health: ${healthStatus}`, statusClass(healthStatus), "Live website or bot health, separate from progress"));
   const automationRun = automationApiId(project) ? state.automationRuns.get(projectId(project)) : null;
-  if (automationRun?.status === "running") badges.append(createBadge("Manual run: Running", "active", "A dashboard-triggered codex exec run is in progress"));
+  if (automationRun?.status === "running") badges.append(createBadge("Manual run: Running", "active", `A dashboard-triggered ${automationRunner(project) === "claude" ? "Claude Code" : "codex exec"} run is in progress`));
   if (project.nameCollision) badges.append(createBadge("Same name", "review", `Also tracked as ${project.nameCollision.homes.join("; ")}`));
   if (project.sourceCollision) badges.append(createBadge("Same source", "review", "Multiple dashboard records point at the same status file or local path"));
   if (projectNeedsReview(project)) badges.append(createBadge("Review needed", "review", "Some project fields are missing, uncertain, or need confirmation"));
@@ -699,7 +738,7 @@ function renderProject(project) {
     appendEvidence(evidence, "Schedule", project.automation.schedule, "When this automation is configured to run");
     appendEvidence(evidence, "Kind", labelize(project.automation.kind || "automation"), "Automation type");
     appendEvidence(evidence, "Model", project.automation.model, "Model configured for this scheduled run");
-    appendEvidence(evidence, "Manual run", describeAutomationRun(automationRun), "Latest run triggered from this dashboard via codex exec");
+    appendEvidence(evidence, "Manual run", describeAutomationRun(automationRun), "Latest run triggered from this dashboard");
   }
   appendEvidence(evidence, "Source", sourceLabel(project), "Dashboard source root that discovered this project");
   appendEvidence(evidence, "Folder", project.localPathFound ? "Found" : project.localPath ? "Missing" : "Not set", "Whether the configured localPath exists on this Mac");
@@ -763,6 +802,40 @@ function renderCompactRow(project) {
   if (maskPrivateTitle) name.classList.add("is-masked");
   name.textContent = displayName;
 
+  // Flags sit next to the title inside the flexible zone, so the right-hand
+  // columns (path, meta, actions) line up across every row.
+  const title = document.createElement("span");
+  title.className = "row-title";
+  title.append(name);
+  if (project.nameCollision) {
+    const duplicate = document.createElement("span");
+    duplicate.className = "row-flag";
+    duplicate.title = `Same project name is tracked in ${project.nameCollision.count} places`;
+    duplicate.textContent = "same name";
+    title.append(duplicate);
+  }
+  if (project.sourceCollision) {
+    const duplicate = document.createElement("span");
+    duplicate.className = "row-flag";
+    duplicate.title = `Same source is tracked by ${project.sourceCollision.count} records`;
+    duplicate.textContent = "same source";
+    title.append(duplicate);
+  }
+  if (review) {
+    const flag = document.createElement("span");
+    flag.className = "row-flag";
+    flag.title = "Needs review";
+    flag.textContent = "review";
+    title.append(flag);
+  }
+  if (automationApiId(project) && state.automationRuns.get(id)?.status === "running") {
+    const flag = document.createElement("span");
+    flag.className = "row-flag";
+    flag.title = "A dashboard-triggered run is in progress";
+    flag.textContent = "running";
+    title.append(flag);
+  }
+
   const home = document.createElement("span");
   home.className = "row-home";
   home.textContent = hidden && !expanded ? "Private" : `${sourceLabel(project)} / ${projectRole(project)} / ${pathShortName(project)}`;
@@ -772,35 +845,7 @@ function renderCompactRow(project) {
   meta.textContent = scheduledMeta(project) || (progress === null ? "—" : `${progress}%`);
   if (progress === null) meta.classList.add("is-unknown");
 
-  trigger.append(chevron, dot, name, home, meta);
-  if (project.nameCollision) {
-    const duplicate = document.createElement("span");
-    duplicate.className = "row-flag";
-    duplicate.title = `Same project name is tracked in ${project.nameCollision.count} places`;
-    duplicate.textContent = "same name";
-    trigger.append(duplicate);
-  }
-  if (project.sourceCollision) {
-    const duplicate = document.createElement("span");
-    duplicate.className = "row-flag";
-    duplicate.title = `Same source is tracked by ${project.sourceCollision.count} records`;
-    duplicate.textContent = "same source";
-    trigger.append(duplicate);
-  }
-  if (review) {
-    const flag = document.createElement("span");
-    flag.className = "row-flag";
-    flag.title = "Needs review";
-    flag.textContent = "review";
-    trigger.append(flag);
-  }
-  if (automationApiId(project) && state.automationRuns.get(id)?.status === "running") {
-    const flag = document.createElement("span");
-    flag.className = "row-flag";
-    flag.title = "A dashboard-triggered run is in progress";
-    flag.textContent = "running";
-    trigger.append(flag);
-  }
+  trigger.append(chevron, dot, title, home, meta);
 
   trigger.addEventListener("click", () => {
     if (state.expandedProjects.has(id)) state.expandedProjects.delete(id);
@@ -884,7 +929,19 @@ function renderCompactRow(project) {
     menuWrap.append(menu);
   }
 
-  rowHead.append(trigger, menuWrap);
+  // Surface automation controls on the collapsed row so they are visible
+  // without expanding; the expanded card repeats them, so hide them then.
+  if (!expanded && automationApiId(project)) {
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
+    actions.append(
+      createRunButton(project, state.automationRuns.get(id) || null),
+      createStatusDropdown(project)
+    );
+    rowHead.append(trigger, actions, menuWrap);
+  } else {
+    rowHead.append(trigger, menuWrap);
+  }
   row.append(rowHead);
 
   if (expanded) {
@@ -897,7 +954,7 @@ function renderCompactRow(project) {
   return row;
 }
 
-function renderGroupedList(container, projects) {
+function renderGroupedList(container, projects, { withHeads = true } = {}) {
   const groups = new Map();
   projects.forEach((project) => {
     const key = groupKey(project);
@@ -907,38 +964,40 @@ function renderGroupedList(container, projects) {
 
   const fragments = sortGroups(groups.keys()).map((key) => {
     const items = groups.get(key).sort(compareProjectsWithinGroup);
-    const collapsed = state.collapsedGroups.has(key);
+    const collapsed = withHeads && state.collapsedGroups.has(key);
 
     const group = document.createElement("section");
     group.className = "project-group";
     group.dataset.status = key;
 
-    const head = document.createElement("button");
-    head.type = "button";
-    head.className = "group-head";
-    head.setAttribute("aria-expanded", String(!collapsed));
+    if (withHeads) {
+      const head = document.createElement("button");
+      head.type = "button";
+      head.className = "group-head";
+      head.setAttribute("aria-expanded", String(!collapsed));
 
-    const gchevron = document.createElement("span");
-    gchevron.className = "group-chevron";
-    gchevron.setAttribute("aria-hidden", "true");
-    gchevron.textContent = "▾";
+      const gchevron = document.createElement("span");
+      gchevron.className = "group-chevron";
+      gchevron.setAttribute("aria-hidden", "true");
+      gchevron.textContent = "▾";
 
-    const gname = document.createElement("span");
-    gname.className = "group-name";
-    gname.textContent = labelize(key);
+      const gname = document.createElement("span");
+      gname.className = "group-name";
+      gname.textContent = labelize(key);
 
-    const gcount = document.createElement("span");
-    gcount.className = "group-count";
-    gcount.textContent = String(items.length);
+      const gcount = document.createElement("span");
+      gcount.className = "group-count";
+      gcount.textContent = String(items.length);
 
-    head.append(gchevron, gname, gcount);
-    head.addEventListener("click", () => {
-      if (state.collapsedGroups.has(key)) state.collapsedGroups.delete(key);
-      else state.collapsedGroups.add(key);
-      render();
-    });
+      head.append(gchevron, gname, gcount);
+      head.addEventListener("click", () => {
+        if (state.collapsedGroups.has(key)) state.collapsedGroups.delete(key);
+        else state.collapsedGroups.add(key);
+        render();
+      });
 
-    group.append(head);
+      group.append(head);
+    }
 
     if (!collapsed) {
       const body = document.createElement("div");
@@ -952,9 +1011,6 @@ function renderGroupedList(container, projects) {
 
   container.replaceChildren(...fragments);
 }
-
-// Status tabs where the Online section renders above the grouped list.
-const ONLINE_SECTION_TABS = new Set(["all", "ongoing", "online"]);
 
 function onlineTone(health) {
   if (!health || !health.status || health.status === "Unknown") return "unknown";
@@ -974,10 +1030,15 @@ function onlineStatusText(health) {
 
 function focusProjectCard(project) {
   const id = projectId(project);
-  // The grouped list is absent on the Online tab and the project may live on
-  // another tab (e.g. a completed site), so fall back to the All view.
-  if (state.statusFilter === "online" || !getVisibleProjects().some((candidate) => projectId(candidate) === id)) {
+  state.view = isScheduledProject(project) ? "scheduled" : "projects";
+  localStorage.setItem("dashboard-view", state.view);
+  // The project may be filtered out of the target view (completed site,
+  // other source or runner), so fall back to the widest view.
+  if (state.view === "scheduled") {
+    if (!matchesScheduledSource(project)) state.scheduledSource = "all";
+  } else if (!getProjectViewProjects().some((candidate) => projectId(candidate) === id)) {
     state.statusFilter = "all";
+    state.sourceFilter = "all";
   }
   state.collapsedGroups.delete(groupKey(project));
   state.expandedProjects.add(id);
@@ -1038,6 +1099,8 @@ function renderOnlineCard(project) {
   return card;
 }
 
+// The strip has no header and no collapse control: the online cards are part
+// of the page base and stay visible at all times.
 function renderOnlineSection(onlineProjects) {
   const hasProjects = onlineProjects.length > 0;
   elements.onlineSection.hidden = !hasProjects;
@@ -1046,43 +1109,129 @@ function renderOnlineSection(onlineProjects) {
     return;
   }
 
-  const collapsed = state.collapsedGroups.has(ONLINE_GROUP_KEY);
+  const body = document.createElement("div");
+  body.className = "online-list";
+  const sorted = [...onlineProjects].sort((a, b) => onlineDisplayName(a).localeCompare(onlineDisplayName(b)));
+  body.append(...sorted.map(renderOnlineCard));
 
-  const head = document.createElement("button");
-  head.type = "button";
-  head.className = "group-head";
-  head.setAttribute("aria-expanded", String(!collapsed));
+  elements.onlineSection.replaceChildren(body);
+}
+
+// Online tab body: one detail card per online project with the full health
+// result plus the related project status, next to the always-visible strip.
+function renderOnlineDetailRow(project) {
+  const id = projectId(project);
+  const hidden = state.hiddenProjects.has(id);
+  const health = project.health || null;
+  const progress = Number.isFinite(project.progress) ? project.progress : null;
+  const repoUrl = project.repoUrl || project.git?.remoteUrl;
+  const expanded = state.expandedOnlineProjects.has(id);
+
+  const row = document.createElement("div");
+  row.className = "compact-row";
+  row.dataset.tone = onlineTone(health);
+  if (expanded) row.classList.add("is-open");
+
+  const rowHead = document.createElement("div");
+  rowHead.className = "row-head";
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "row-trigger";
+  trigger.setAttribute("aria-expanded", String(expanded));
 
   const chevron = document.createElement("span");
-  chevron.className = "group-chevron";
+  chevron.className = "row-chevron";
   chevron.setAttribute("aria-hidden", "true");
-  chevron.textContent = "▾";
+  chevron.textContent = "›";
+
+  const dot = document.createElement("span");
+  dot.className = "row-dot";
+  dot.setAttribute("aria-hidden", "true");
 
   const name = document.createElement("span");
-  name.className = "group-name";
-  name.textContent = "Online";
+  name.className = "row-name";
+  name.textContent = onlineDisplayName(project);
 
-  const count = document.createElement("span");
-  count.className = "group-count";
-  count.textContent = String(onlineProjects.length);
+  const title = document.createElement("span");
+  title.className = "row-title";
+  title.append(name);
 
-  head.append(chevron, name, count);
-  head.addEventListener("click", () => {
-    if (state.collapsedGroups.has(ONLINE_GROUP_KEY)) state.collapsedGroups.delete(ONLINE_GROUP_KEY);
-    else state.collapsedGroups.add(ONLINE_GROUP_KEY);
+  const home = document.createElement("span");
+  home.className = "row-home";
+  try {
+    home.textContent = new URL(project.liveUrl || project.healthCheckUrl).hostname;
+  } catch {
+    home.textContent = project.liveUrl || project.healthCheckUrl || "";
+  }
+
+  trigger.append(chevron, dot, title, home);
+  trigger.addEventListener("click", () => {
+    if (state.expandedOnlineProjects.has(id)) state.expandedOnlineProjects.delete(id);
+    else state.expandedOnlineProjects.add(id);
     render();
   });
 
-  const children = [head];
-  if (!collapsed) {
-    const body = document.createElement("div");
-    body.className = "online-list";
-    const sorted = [...onlineProjects].sort((a, b) => onlineDisplayName(a).localeCompare(onlineDisplayName(b)));
-    body.append(...sorted.map(renderOnlineCard));
-    children.push(body);
+  const actions = document.createElement("div");
+  actions.className = "row-actions";
+  if (project.liveUrl) actions.append(createLink("Open", project.liveUrl));
+
+  rowHead.append(trigger, actions);
+  row.append(rowHead);
+
+  if (expanded) {
+    const detail = document.createElement("div");
+    detail.className = "row-detail online-detail";
+
+    const details = document.createElement("dl");
+    details.className = "evidence online-detail-facts";
+    appendEvidence(details, "Live status", onlineStatusText(health), "Result of the latest configured live URL check");
+    appendEvidence(details, "Status code", health?.statusCode ? String(health.statusCode) : "Unknown", "HTTP status code from the latest check");
+    appendEvidence(details, "Response time", Number.isFinite(health?.responseTimeMs) ? `${health.responseTimeMs} ms` : "Unknown", "How long the latest check took");
+    appendEvidence(details, "Last checked", health?.checkedAt ? compactDate(health.checkedAt) : "Not checked", "When live health was last checked from this dashboard");
+    appendEvidence(details, "Live URL", project.liveUrl || "Not set", "Public address this check hits");
+    if (project.healthCheckUrl && project.healthCheckUrl !== project.liveUrl) {
+      appendEvidence(details, "Health check URL", project.healthCheckUrl, "Dedicated health endpoint used for the check");
+    }
+    if (!hidden) {
+      // Private projects keep their detail status-only, same as the strip.
+      appendEvidence(details, "Project status", labelize(project.status), "Current workflow state for this project");
+      appendEvidence(details, "Phase", project.phase || "Unknown phase", "Current project phase from the dashboard config");
+      appendEvidence(details, "Progress", progress === null ? "Unknown" : `${progress}%`, "Hand-set progress, separate from live health");
+      appendEvidence(details, "Next action", project.nextAction || "Not set", "Concrete next step for this project");
+      appendEvidence(details, "Git state", project.git?.available ? `${project.git.branch}, ${project.git.dirty ? "uncommitted changes" : "clean"}` : project.git?.reason, "Current branch and whether Git sees local changes");
+      appendEvidence(details, "Last commit", project.git?.lastCommit ? `${compactDate(project.git.lastCommit.date)} / ${project.git.lastCommit.hash}` : "Unknown", "Most recent commit in the local repo");
+    }
+
+    const links = document.createElement("div");
+    links.className = "online-links";
+    if (!hidden && repoUrl) links.append(createLink("Repo", repoUrl));
+
+    const jump = document.createElement("button");
+    jump.type = "button";
+    jump.className = "link-pill";
+    jump.textContent = "Project card";
+    if (hidden) {
+      jump.disabled = true;
+      jump.title = "Private project";
+    } else {
+      jump.addEventListener("click", () => focusProjectCard(project));
+    }
+    links.append(jump);
+
+    detail.append(details, links);
+    row.append(detail);
   }
 
-  elements.onlineSection.replaceChildren(...children);
+  return row;
+}
+
+function renderOnlineDetailList(onlineProjects) {
+  const sorted = [...onlineProjects].sort((a, b) => onlineDisplayName(a).localeCompare(onlineDisplayName(b)));
+  const list = document.createElement("div");
+  list.className = "online-detail-list";
+  list.append(...sorted.map(renderOnlineDetailRow));
+  elements.list.replaceChildren(list);
 }
 
 function groupKeysOf(projects) {
@@ -1124,8 +1273,15 @@ function getVisibleProjects() {
   return getScopedProjects().filter((project) => matchesStatus(project) && matchesSearch(project));
 }
 
+// Scheduled automations live on their own view tab, never in the tracked list.
+function getProjectViewProjects() {
+  return getVisibleProjects().filter((project) => !isScheduledProject(project));
+}
+
+// The metric strip is part of the shared page base, so it always counts every
+// project; the Claude/Codex source tabs scope only the tracked list.
 function renderMetrics(visible) {
-  const scoped = getScopedProjects();
+  const scoped = state.projects;
   const ongoing = scoped.filter(isOngoing).length;
   const planning = scoped.filter((project) => statusClass(project.status) === "planning").length;
   const completed = scoped.filter((project) => statusClass(project.status) === "completed").length;
@@ -1147,7 +1303,7 @@ function renderCompletedPanel() {
     .sort((a, b) => String(b.completedAt || "").localeCompare(String(a.completedAt || "")));
   const visible = state.showAllCompleted ? completed : completed.slice(0, 3);
 
-  elements.completedPanel.hidden = state.statusFilter !== "ongoing";
+  elements.completedPanel.hidden = state.view !== "projects" || state.statusFilter !== "ongoing";
   elements.toggleCompleted.textContent = state.showAllCompleted ? "Show last completed" : "Show all completed";
   elements.completedList.replaceChildren(...visible.map(renderProject));
 
@@ -1159,206 +1315,245 @@ function renderCompletedPanel() {
   }
 }
 
-function renderNextProject(item) {
-  const card = document.createElement("article");
-  card.className = "next-project-card";
-
-  const header = document.createElement("div");
-  header.className = "next-project-header";
-
-  const titleWrap = document.createElement("div");
-  const title = document.createElement("h3");
-  title.textContent = item.title || "Untitled idea";
-  const meta = document.createElement("p");
-  meta.className = "next-project-meta";
-  meta.textContent = [item.category, item.status].filter(Boolean).join(" / ") || "Idea";
-  titleWrap.append(title, meta);
-
-  const copy = createCopyButton("Copy idea", buildNextProjectContext(item));
-  header.append(titleWrap, copy);
-
-  const summary = document.createElement("p");
-  summary.className = "next-project-summary";
-  summary.textContent = item.summary || "No summary yet.";
-
-  const why = document.createElement("p");
-  why.className = "next-project-why";
-  why.textContent = item.why || "No rationale recorded yet.";
-
-  const nextAction = document.createElement("p");
-  nextAction.className = "next-project-action";
-  nextAction.textContent = `Next: ${item.nextAction || "Decide whether to keep, park, or start this idea."}`;
-
-  card.append(header, summary, why, nextAction);
-  return card;
+function nextProjectKey(item, index) {
+  return item.id || item.title || `idea-${index}`;
 }
 
-function renderNextProjects() {
-  const items = state.nextProjects || [];
-  const hiddenCount = Math.max(items.length - NEXT_PROJECT_PREVIEW_LIMIT, 0);
-  const visibleItems = state.showAllNextProjects ? items : items.slice(0, NEXT_PROJECT_PREVIEW_LIMIT);
+// Suggestions share the tracked-list row look: collapsed row with chevron,
+// dot, title and meta, Copy idea on the right, details in the expanded body.
+function renderNextProject(item, index) {
+  const key = nextProjectKey(item, index);
+  const expanded = state.expandedNextProjects.has(key);
 
-  elements.nextProjects.hidden = items.length === 0;
-  elements.nextProjectCount.textContent = state.showAllNextProjects || hiddenCount === 0
-    ? `${items.length} ${items.length === 1 ? "idea" : "ideas"}`
-    : `Showing ${visibleItems.length} of ${items.length} ideas`;
-  elements.nextProjectList.replaceChildren(...visibleItems.map(renderNextProject));
+  const row = document.createElement("div");
+  row.className = "compact-row";
+  row.dataset.status = "planning";
+  if (expanded) row.classList.add("is-open");
 
-  elements.toggleNextProjects.hidden = hiddenCount === 0;
-  elements.toggleNextProjects.textContent = state.showAllNextProjects ? "Show fewer" : `Show more (${hiddenCount})`;
-}
+  const rowHead = document.createElement("div");
+  rowHead.className = "row-head";
 
-function matchesChecklistSearch(item) {
-  if (!state.query) return true;
-  const haystack = [item.title, item.detail, item.group, item.source]
-    .filter(Boolean).join(" ").toLowerCase();
-  return haystack.includes(state.query.toLowerCase());
-}
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "row-trigger";
+  trigger.setAttribute("aria-expanded", String(expanded));
 
-async function toggleChecklistItem(item, checkbox) {
-  checkbox.disabled = true;
-  try {
-    const response = await fetch(`/api/checklist/items/${encodeURIComponent(item.id)}/toggle`, { method: "POST" });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `Toggle failed: ${response.status}`);
-    item.done = payload.item.done;
-    item.doneAt = payload.item.doneAt;
-    showToast(item.done ? "Checked off" : "Reopened");
-  } catch (error) {
-    showToast(error.message);
-    loadChecklist().catch(() => {});
-  }
-  renderChecklist();
-}
+  const chevron = document.createElement("span");
+  chevron.className = "row-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "›";
 
-function renderChecklistItem(item) {
-  const row = document.createElement("label");
-  row.className = "check-row";
-  if (item.done) row.classList.add("is-done");
+  const dot = document.createElement("span");
+  dot.className = "row-dot";
+  dot.setAttribute("aria-hidden", "true");
 
-  const checkbox = document.createElement("input");
-  checkbox.type = "checkbox";
-  checkbox.className = "check-box";
-  checkbox.checked = Boolean(item.done);
-  checkbox.addEventListener("change", () => toggleChecklistItem(item, checkbox));
-
-  const body = document.createElement("span");
-  body.className = "check-body";
+  const name = document.createElement("span");
+  name.className = "row-name";
+  name.textContent = item.title || "Untitled idea";
 
   const title = document.createElement("span");
-  title.className = "check-title";
-  title.textContent = item.title;
+  title.className = "row-title";
+  title.append(name);
 
-  const detail = document.createElement("span");
-  detail.className = "check-detail";
-  detail.textContent = item.detail || "";
+  const home = document.createElement("span");
+  home.className = "row-home";
+  home.textContent = [item.category, item.status].filter(Boolean).join(" / ") || "Idea";
 
-  const meta = document.createElement("span");
-  meta.className = "check-meta";
-  meta.textContent = [
-    item.source ? `From: ${item.source}` : null,
-    item.done && item.doneAt ? `Done ${compactDate(item.doneAt)}` : null
-  ].filter(Boolean).join(" / ");
+  trigger.append(chevron, dot, title, home);
+  trigger.addEventListener("click", () => {
+    if (state.expandedNextProjects.has(key)) state.expandedNextProjects.delete(key);
+    else state.expandedNextProjects.add(key);
+    renderNextProjects();
+  });
 
-  body.append(title);
-  if (item.detail) body.append(detail);
-  if (meta.textContent) body.append(meta);
+  const actions = document.createElement("div");
+  actions.className = "row-actions";
+  actions.append(createCopyButton("Copy idea", buildNextProjectContext(item)));
 
-  row.append(checkbox, body);
+  rowHead.append(trigger, actions);
+  row.append(rowHead);
 
-  if (item.link) {
-    const actions = document.createElement("span");
-    actions.className = "check-actions";
-    actions.append(createCopyButton("Copy doc path", item.link));
-    // Clicking the copy button must not toggle the wrapping label's checkbox.
-    actions.addEventListener("click", (event) => event.preventDefault());
-    row.append(actions);
+  if (expanded) {
+    const detail = document.createElement("div");
+    detail.className = "row-detail next-project-detail";
+
+    const summary = document.createElement("p");
+    summary.className = "next-project-summary";
+    summary.textContent = item.summary || "No summary yet.";
+
+    const why = document.createElement("p");
+    why.className = "next-project-why";
+    why.textContent = item.why || "No rationale recorded yet.";
+
+    const nextAction = document.createElement("p");
+    nextAction.className = "next-project-action";
+    nextAction.textContent = `Next: ${item.nextAction || "Decide whether to keep, park, or start this idea."}`;
+
+    detail.append(summary, why, nextAction);
+    row.append(detail);
   }
 
   return row;
 }
 
-function renderChecklist() {
-  const items = state.checklist.items || [];
-  const doneCount = items.filter((item) => item.done).length;
-  const visible = items.filter(matchesChecklistSearch);
+// The What's next list has no section-wide collapse; each suggestion row
+// expands and collapses on its own.
+function renderNextProjects() {
+  elements.nextProjects.hidden = state.view !== "next";
+  // The panel is rebuilt on every render pass; skip the DOM work while it is
+  // hidden behind another tab.
+  if (state.view !== "next") return;
 
-  elements.checklistSummary.textContent = items.length === 0
-    ? "No checklist items yet. Add them to data/checklist.json."
-    : `${state.checklist.title || "Checklist"}: ${doneCount} of ${items.length} done`;
-  elements.checklistBar.style.setProperty(
-    "--progress-width",
-    items.length === 0 ? "0%" : `${Math.round((doneCount / items.length) * 100)}%`
-  );
-  elements.checklistDescription.hidden = !state.checklist.description;
-  elements.checklistDescription.textContent = state.checklist.description || "";
+  const items = state.nextProjects || [];
+  const hiddenCount = Math.max(items.length - NEXT_PROJECT_PREVIEW_LIMIT, 0);
+  const visibleItems = state.showAllNextProjects ? items : items.slice(0, NEXT_PROJECT_PREVIEW_LIMIT);
 
-  const groups = new Map();
-  visible.forEach((item) => {
-    const key = item.group || "Items";
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
-  });
-
-  const fragments = [...groups.entries()].map(([key, groupItems]) => {
-    const section = document.createElement("section");
-    section.className = "check-group";
-
-    const head = document.createElement("div");
-    head.className = "group-head check-group-head";
-
-    const name = document.createElement("span");
-    name.className = "group-name";
-    name.textContent = key;
-
-    const count = document.createElement("span");
-    count.className = "group-count";
-    count.textContent = `${groupItems.filter((item) => item.done).length}/${groupItems.length}`;
-
-    head.append(name, count);
-    const body = document.createElement("div");
-    body.className = "check-group-body";
-    body.append(...groupItems.map(renderChecklistItem));
-
-    section.append(head, body);
-    return section;
-  });
-
-  if (fragments.length === 0) {
+  if (items.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = items.length === 0
-      ? "This checklist is empty."
-      : "No checklist items match this search.";
-    elements.checklistGroups.replaceChildren(empty);
+    empty.textContent = "No project suggestions right now.";
+    elements.nextProjectList.replaceChildren(empty);
+  } else {
+    elements.nextProjectList.replaceChildren(...visibleItems.map(renderNextProject));
+  }
+
+  elements.toggleNextProjects.hidden = hiddenCount === 0;
+  elements.toggleNextProjects.textContent = state.showAllNextProjects ? "Show fewer" : `Show more (${hiddenCount})`;
+}
+
+// Checklists tab, first list: one item per project card's next action.
+// Check state is local-only (browser localStorage), it never edits the
+// project's own nextAction.
+function renderNextStepRow(project) {
+  const id = projectId(project);
+  const checked = state.checkedNextSteps.has(id);
+  const expanded = state.expandedNextSteps.has(id);
+
+  const row = document.createElement("div");
+  row.className = "check-row";
+  if (checked) row.classList.add("is-done");
+  if (expanded) row.classList.add("is-open");
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "check-box";
+  checkbox.checked = checked;
+  checkbox.addEventListener("change", () => {
+    if (state.checkedNextSteps.has(id)) state.checkedNextSteps.delete(id);
+    else state.checkedNextSteps.add(id);
+    saveCheckedNextSteps();
+    renderChecklistsView();
+  });
+
+  const body = document.createElement("button");
+  body.type = "button";
+  body.className = "check-body check-toggle";
+  body.setAttribute("aria-expanded", String(expanded));
+
+  const title = document.createElement("span");
+  title.className = "check-title";
+
+  const chevron = document.createElement("span");
+  chevron.className = "row-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "›";
+
+  const titleText = document.createElement("span");
+  titleText.textContent = project.name || "Untitled project";
+
+  title.append(chevron, titleText);
+  body.append(title);
+
+  if (expanded) {
+    const detail = document.createElement("span");
+    detail.className = "check-detail";
+    detail.textContent = String(project.nextAction).trim();
+    body.append(detail);
+  }
+
+  body.addEventListener("click", () => {
+    if (state.expandedNextSteps.has(id)) state.expandedNextSteps.delete(id);
+    else state.expandedNextSteps.add(id);
+    renderChecklistsView();
+  });
+
+  row.append(checkbox, body);
+  return row;
+}
+
+function renderChecklistsView() {
+  if (state.view !== "checklists") return;
+
+  const items = state.projects
+    .filter((project) => !state.hiddenProjects.has(projectId(project)))
+    .filter((project) => String(project.nextAction || "").trim())
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+
+  if (items.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No project next steps found.";
+    elements.checklistsView.replaceChildren(empty);
     return;
   }
 
-  elements.checklistGroups.replaceChildren(...fragments);
-}
+  const group = document.createElement("section");
+  group.className = "check-group";
 
-async function loadChecklist() {
-  const response = await fetch("/api/checklist");
-  if (!response.ok) throw new Error(`Checklist load failed: ${response.status}`);
-  const payload = await response.json();
-  state.checklist = {
-    title: payload.title || "Checklist",
-    description: payload.description || "",
-    items: Array.isArray(payload.items) ? payload.items : []
-  };
-  if (state.statusFilter === "checklist") renderChecklist();
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "group-head check-group-head";
+  head.setAttribute("aria-expanded", String(!state.nextStepsCollapsed));
+
+  const chevron = document.createElement("span");
+  chevron.className = "group-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "▾";
+
+  const gname = document.createElement("span");
+  gname.className = "group-name";
+  gname.textContent = "Projects Next Steps";
+
+  const gcount = document.createElement("span");
+  gcount.className = "group-count";
+  gcount.textContent = String(items.length);
+
+  head.append(chevron, gname, gcount);
+  head.addEventListener("click", () => {
+    state.nextStepsCollapsed = !state.nextStepsCollapsed;
+    renderChecklistsView();
+  });
+
+  group.append(head);
+
+  if (!state.nextStepsCollapsed) {
+    const body = document.createElement("div");
+    body.className = "check-group-body";
+    body.append(...items.map(renderNextStepRow));
+    group.append(body);
+  }
+
+  elements.checklistsView.replaceChildren(group);
 }
 
 function render() {
   const sourceLabel = sourceLabels[state.sourceFilter] || sourceLabels.all;
   const [statusLabel, title] = statusLabels[state.statusFilter] || statusLabels.ongoing;
-  const visible = getVisibleProjects();
+  const visible = getProjectViewProjects();
   elements.viewEyebrow.textContent = `${sourceLabel} / ${statusLabel}`;
   elements.viewTitle.textContent = title;
   elements.lastUpdated.textContent = state.generatedAt ? `Updated ${compactDate(state.generatedAt)}` : "Not loaded";
 
+  elements.viewTabs.forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.view === state.view);
+  });
+
   elements.sourceTabs.forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.sourceFilter === state.sourceFilter);
+  });
+
+  elements.scheduledSourceTabs.forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.scheduledSource === state.scheduledSource);
   });
 
   elements.statusTabs.forEach((tab) => {
@@ -1369,34 +1564,50 @@ function render() {
     tab.classList.toggle("is-active", tab.dataset.sortMode === state.sortMode);
   });
 
+  const onProjectsView = state.view === "projects";
+  elements.controlBand.hidden = !onProjectsView;
+  elements.projectsHead.hidden = !onProjectsView;
+  elements.scheduledBand.hidden = state.view !== "scheduled";
+  elements.checklistsView.hidden = state.view !== "checklists";
+  renderChecklistsView();
+
   renderMetrics(visible);
   renderCompletedPanel();
+  renderNextProjects();
 
-  // The Checklist tab replaces the project list entirely.
-  elements.checklistPanel.hidden = state.statusFilter !== "checklist";
-  if (state.statusFilter === "checklist") {
-    renderOnlineSection([]);
-    updateGroupToggle([]);
-    elements.list.replaceChildren();
-    renderChecklist();
-    return;
-  }
-
-  const onlineProjects = ONLINE_SECTION_TABS.has(state.statusFilter)
-    ? getScopedProjects().filter(isOnlineProject).filter(matchesSearch)
-    : [];
+  // The Online strip is part of the shared page base: it stays visible on
+  // every view tab and ignores the tracked-list source and status filters.
+  const onlineProjects = state.projects.filter(isOnlineProject);
   renderOnlineSection(onlineProjects);
 
-  // The Online tab shows only the Online section, never the status groups.
-  if (state.statusFilter === "online") {
-    updateGroupToggle([]);
+  if (state.view === "online") {
     if (onlineProjects.length === 0) {
       const empty = document.createElement("p");
       empty.className = "empty";
-      empty.textContent = "No online projects match this view.";
+      empty.textContent = "No online projects are configured yet.";
       elements.list.replaceChildren(empty);
     } else {
-      elements.list.replaceChildren();
+      renderOnlineDetailList(onlineProjects);
+    }
+    return;
+  }
+
+  if (state.view === "next" || state.view === "checklists") {
+    elements.list.replaceChildren();
+    return;
+  }
+
+  if (state.view === "scheduled") {
+    const scheduled = state.projects.filter(isScheduledProject).filter(matchesScheduledSource);
+    if (scheduled.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = state.scheduledSource === "all"
+        ? "No scheduled automations are tracked yet."
+        : `No ${state.scheduledSource === "claude" ? "Claude" : "Codex"} scheduled tasks are tracked yet.`;
+      elements.list.replaceChildren(empty);
+    } else {
+      renderGroupedList(elements.list, scheduled, { withHeads: false });
     }
     return;
   }
@@ -1499,9 +1710,24 @@ async function syncAndLoadProjects() {
   }
 }
 
+elements.viewTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    state.view = tab.dataset.view;
+    localStorage.setItem("dashboard-view", state.view);
+    render();
+  });
+});
+
 elements.sourceTabs.forEach((tab) => {
   tab.addEventListener("click", () => {
     state.sourceFilter = tab.dataset.sourceFilter;
+    render();
+  });
+});
+
+elements.scheduledSourceTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    state.scheduledSource = tab.dataset.scheduledSource;
     render();
   });
 });
@@ -1547,7 +1773,7 @@ elements.toggleNextProjects.addEventListener("click", () => {
   renderNextProjects();
 });
 elements.toggleGroups.addEventListener("click", () => {
-  const visible = getVisibleProjects();
+  const visible = getProjectViewProjects();
   const keys = groupKeysOf(visible);
   const projectIds = projectIdsOf(visible);
 
@@ -1573,10 +1799,6 @@ applyTheme();
 updateBackToTop();
 
 loadNextProjects().catch((error) => {
-  showToast(error.message);
-});
-
-loadChecklist().catch((error) => {
   showToast(error.message);
 });
 

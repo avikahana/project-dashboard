@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { execFile } from "node:child_process";
-import { access, readFile, stat, writeFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mergeProjectStatusFile, syncProjects } from "./lib/project-sync.mjs";
@@ -13,8 +13,56 @@ const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || "127.0.0.1";
 const CONFIG_PATH = path.join(__dirname, "data", "dashboard.config.json");
 const NEXT_PROJECTS_PATH = path.join(__dirname, "data", "next-projects.json");
-const CHECKLIST_PATH = path.join(__dirname, "data", "checklist.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
+
+// The dashboard ships with no authentication and exposes local paths, repo
+// URLs, and an endpoint that spawns agent runs, so it is only safe on the
+// loopback interface. A non-loopback bind must be opted into explicitly and
+// fronted by an authenticating proxy (see README "Exposing the dashboard").
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+const BIND_IS_LOOPBACK = LOOPBACK_HOSTS.has(HOST);
+const ALLOW_REMOTE_BIND = process.env.DASHBOARD_ALLOW_REMOTE === "1";
+
+// Host header values this server answers to. This is the DNS-rebinding guard:
+// a hostile page that repoints its own hostname at 127.0.0.1 still sends its
+// own Host header, which is not on this list. Extra names (a reverse proxy or
+// tunnel domain) are added via DASHBOARD_ALLOWED_HOSTS (comma-separated).
+const ALLOWED_HOSTS = (() => {
+  const hosts = new Set();
+  for (const name of ["localhost", "127.0.0.1", "[::1]", HOST]) {
+    hosts.add(name.toLowerCase());
+    hosts.add(`${name}:${PORT}`.toLowerCase());
+  }
+  for (const extra of (process.env.DASHBOARD_ALLOWED_HOSTS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)) {
+    hosts.add(extra.toLowerCase());
+  }
+  return hosts;
+})();
+
+function isAllowedHost(hostHeader) {
+  return Boolean(hostHeader) && ALLOWED_HOSTS.has(String(hostHeader).toLowerCase());
+}
+
+// Returns an error message if a mutating request should be rejected, else null.
+// Browsers always attach an Origin on cross-origin writes, so an Origin that is
+// not same-origin is a CSRF attempt. A missing Origin only comes from
+// non-browser clients (curl, scripts) and is trusted only on a loopback bind.
+function writeRejectionReason(req) {
+  const origin = req.headers.origin;
+  if (origin) {
+    let host = null;
+    try {
+      host = new URL(origin).host;
+    } catch {
+      // Malformed Origin is rejected below.
+    }
+    return isAllowedHost(host) ? null : "Cross-origin write rejected";
+  }
+  return BIND_IS_LOOPBACK ? null : "Write requires a same-origin request";
+}
 
 // Discovery + git enrichment spawn many subprocesses; cache so the 30s
 // frontend poll does not rescan every source root on each request.
@@ -70,22 +118,15 @@ async function pathExists(localPath) {
   }
 }
 
-// A missing checklist file behaves as an empty checklist so fresh clones
-// (data/ is gitignored) render the tab without errors.
-async function readChecklist() {
-  try {
-    return JSON.parse(await readFile(CHECKLIST_PATH, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      return { title: "Checklist", updatedAt: null, items: [] };
-    }
-    throw error;
-  }
-}
-
+// A missing or unreadable config behaves as an empty dashboard so a fresh
+// clone (data/ is gitignored) serves live checks without a 500.
 async function readConfig() {
-  const raw = await readFile(CONFIG_PATH, "utf8");
-  const parsed = JSON.parse(raw);
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
+  } catch {
+    return { projects: [] };
+  }
   const projects = Array.isArray(parsed.projects) ? parsed.projects : [];
   return {
     ...parsed,
@@ -270,19 +311,13 @@ function invalidateProjectsCache() {
 }
 
 async function handleApi(req, res, requestUrl) {
-  // Mutating routes are same-origin only: a hostile web page can fire blind
-  // cross-origin POSTs at localhost from the user's own browser, so reject
-  // any browser request whose Origin does not match the addressed host.
-  // Non-browser clients (curl, scripts) send no Origin and stay allowed.
-  if (req.method !== "GET" && req.headers.origin) {
-    let originHost = null;
-    try {
-      originHost = new URL(req.headers.origin).host;
-    } catch {
-      // Malformed Origin stays null and is rejected below.
-    }
-    if (!originHost || originHost !== req.headers.host) {
-      sendJson(res, 403, { error: "Cross-origin write rejected" });
+  // Mutating routes are same-origin only. The Origin is checked against a
+  // fixed host allowlist (not the request's own Host header), so a
+  // DNS-rebinding page cannot make itself look same-origin.
+  if (req.method !== "GET") {
+    const rejection = writeRejectionReason(req);
+    if (rejection) {
+      sendJson(res, 403, { error: rejection });
       return;
     }
   }
@@ -338,54 +373,33 @@ async function handleApi(req, res, requestUrl) {
   }
 
   if (requestUrl.pathname === "/api/next-projects") {
-    const raw = await readFile(NEXT_PROJECTS_PATH, "utf8");
-    sendJson(res, 200, JSON.parse(raw));
-    return;
-  }
-
-  if (requestUrl.pathname === "/api/checklist") {
-    if (req.method !== "GET") {
-      sendJson(res, 405, { error: "Use GET for checklist" });
-      return;
+    // Missing file on a fresh clone (data/ is gitignored) is an empty list,
+    // not a 500.
+    let payload = { suggestions: [] };
+    try {
+      payload = JSON.parse(await readFile(NEXT_PROJECTS_PATH, "utf8"));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
     }
-    sendJson(res, 200, await readChecklist());
-    return;
-  }
-
-  // Toggle one checklist item. The id is only matched against items already
-  // in the checklist file; it never reaches the filesystem or a shell.
-  const checklistMatch = requestUrl.pathname.match(/^\/api\/checklist\/items\/([A-Za-z0-9._-]+)\/toggle$/);
-  if (checklistMatch) {
-    if (req.method !== "POST") {
-      sendJson(res, 405, { error: "Use POST for toggle" });
-      return;
-    }
-    const checklist = await readChecklist();
-    const item = (checklist.items || []).find((candidate) => candidate.id === checklistMatch[1]);
-    if (!item) {
-      sendJson(res, 404, { error: `Unknown checklist item: ${checklistMatch[1]}` });
-      return;
-    }
-    item.done = !item.done;
-    item.doneAt = item.done ? new Date().toISOString() : null;
-    checklist.updatedAt = new Date().toISOString();
-    await writeFile(CHECKLIST_PATH, JSON.stringify(checklist, null, 2) + "\n", "utf8");
-    sendJson(res, 200, { updatedAt: checklist.updatedAt, item });
+    sendJson(res, 200, payload);
     return;
   }
 
   // Scheduled card actions. The id is only ever matched against automations
-  // discovered on disk; it never reaches the filesystem or a shell.
+  // discovered on disk; it never reaches the filesystem or a shell. The
+  // optional runner hint disambiguates a Codex automation and a Claude task
+  // that happen to share an id.
   const automationMatch = requestUrl.pathname.match(/^\/api\/automations\/([A-Za-z0-9._-]+)\/(pause|resume|run|last-run)$/);
   if (automationMatch) {
     const [, automationId, action] = automationMatch;
+    const runner = requestUrl.searchParams.get("runner");
 
     if (action === "last-run") {
       if (req.method !== "GET") {
         sendJson(res, 405, { error: "Use GET for last-run" });
         return;
       }
-      const result = await getLastRun(automationId);
+      const result = await getLastRun(automationId, runner);
       if (!result) {
         sendJson(res, 404, { error: `Unknown automation: ${automationId}` });
         return;
@@ -401,7 +415,7 @@ async function handleApi(req, res, requestUrl) {
 
     if (action === "run") {
       try {
-        const result = await runAutomation(automationId);
+        const result = await runAutomation(automationId, runner);
         if (!result) {
           sendJson(res, 404, { error: `Unknown automation: ${automationId}` });
           return;
@@ -412,7 +426,7 @@ async function handleApi(req, res, requestUrl) {
           sendJson(res, 409, { error: error.message });
           return;
         }
-        if (error.code === "NO_CODEX" || error.code === "NO_PROMPT") {
+        if (error.code === "NO_CODEX" || error.code === "NO_CLAUDE" || error.code === "NO_PROMPT") {
           sendJson(res, 503, { error: error.message });
           return;
         }
@@ -421,7 +435,7 @@ async function handleApi(req, res, requestUrl) {
       return;
     }
 
-    const result = await setAutomationStatus(automationId, action);
+    const result = await setAutomationStatus(automationId, action, runner);
     if (!result) {
       sendJson(res, 404, { error: `Unknown automation: ${automationId}` });
       return;
@@ -455,6 +469,12 @@ async function serveStatic(req, res, requestUrl) {
 
 const server = createServer(async (req, res) => {
   try {
+    // DNS-rebinding guard: reject any request whose Host header is not one this
+    // server was told to answer to, before it can read data or trigger a run.
+    if (!isAllowedHost(req.headers.host)) {
+      sendJson(res, 403, { error: "Host not allowed" });
+      return;
+    }
     const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     if (requestUrl.pathname.startsWith("/api/")) {
       await handleApi(req, res, requestUrl);
@@ -475,6 +495,17 @@ server.on("error", (error) => {
   process.exitCode = 1;
 });
 
+if (!BIND_IS_LOOPBACK && !ALLOW_REMOTE_BIND) {
+  console.error(
+    `Refusing to bind ${HOST}: the dashboard has no built-in authentication and would expose local paths and an agent-run trigger to the network.\n` +
+    "Keep HOST on 127.0.0.1, or put an authenticating proxy in front and set DASHBOARD_ALLOW_REMOTE=1 (add the public hostname to DASHBOARD_ALLOWED_HOSTS)."
+  );
+  process.exit(1);
+}
+
 server.listen(PORT, HOST, () => {
+  if (!BIND_IS_LOOPBACK) {
+    console.warn(`Warning: binding ${HOST} exposes the dashboard beyond this machine. Ensure an authenticating proxy sits in front of it.`);
+  }
   console.log(`Project dashboard running at http://${HOST}:${PORT}`);
 });

@@ -1,14 +1,23 @@
 {
-  "name": "avi-project-dashboard",
+  "name": "project-dashboard",
   "version": "0.1.0",
-  "private": true,
+  "description": "A local, dependency-free dashboard for tracking active projects, completed projects, local folders, repos, scheduled agent tasks, and online health.",
+  "license": "Apache-2.0",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/avikahana/project-dashboard.git"
+  },
+  "homepage": "https://github.com/avikahana/project-dashboard#readme",
+  "bugs": {
+    "url": "https://github.com/avikahana/project-dashboard/issues"
+  },
   "scripts": {
     "dev": "node server.mjs",
     "start": "node server.mjs",
     "sync": "node scripts/sync-projects.mjs",
     "sync:dry-run": "node scripts/sync-projects.mjs --dry-run",
-    "check": "node --check server.mjs && node --check public/app.js && node --check lib/project-sync.mjs && node --check scripts/sync-projects.mjs"
+    "check": "node --check server.mjs && node --check public/app.js && node --check lib/project-sync.mjs && node --check lib/claude-tasks.mjs && node --check lib/automation-actions.mjs && node --check lib/json-files.mjs && node --check scripts/sync-projects.mjs"
   },
   "engines": {
     "node": ">=20"

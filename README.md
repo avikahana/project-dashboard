@@ -1,6 +1,6 @@
 # Projects Dashboard
 
-A local dashboard for tracking active projects, completed projects, local folders, repos, and online health.
+A local dashboard for tracking active projects, completed projects, local folders, repos, scheduled agent tasks, and online health.
 
 ![Projects Dashboard board view](docs/screenshot-dashboard.png)
 
@@ -21,6 +21,20 @@ http://127.0.0.1:4173
 ```
 
 The app has no third-party package dependencies. It uses Node's built-in HTTP server, Git CLI metadata, and a static frontend.
+
+### First run
+
+`data/` is machine-specific and gitignored, so a fresh clone starts empty: no projects, no suggestions, no scheduled tasks. That is expected. To populate the dashboard, create `data/dashboard.sources.json` (see Sync Projects below) and press **Refresh projects**, or run `npm run sync`.
+
+## Layout
+
+The page base, visible on every tab, is the metric strip (Ongoing, Planning, Scheduled, Completed, Online, Needs review) with the Online strip directly under it. Below that, a left rail switches between five views:
+
+- **Tracked projects**: the grouped project list (pinned, active, building, planning, paused, blocked, completed, private), with source and status filters, search, and sorting. Each row expands into the full project card.
+- **Scheduled**: Codex automations and Claude Code scheduled tasks, with a Claude/Codex/All filter and per-task controls (see Scheduled Tasks below).
+- **What's next**: idea cards from `data/next-projects.json`. These are suggestions, not tracked projects, and do not affect any counts.
+- **Online**: one expandable row per project with a `liveUrl` or `healthCheckUrl`, showing the full latest health result.
+- **Checklists**: a per-project next-step list built from each card's `nextAction`. Check state is browser-local only and never edits the project's own files.
 
 ## Sync Projects
 
@@ -46,21 +60,11 @@ The dashboard also runs sync before serving `/api/projects`, so normal page load
 
 Duplicate retained records that point at the same `statusFile` or `localPath` are collapsed during sync.
 
-Codex scheduled tasks are also discovered from:
-
-```text
-$CODEX_HOME/automations/*/automation.toml
-```
-
-Each automation becomes its own card under the Scheduled group, using the real automation name, status, recurrence rule, target workspace, model, and prompt. These cards are read-only reflections of Codex automation state; edit the automation itself to change the card.
-
 Next-project suggestions live in:
 
 ```text
 data/next-projects.json
 ```
-
-Each suggestion becomes its own card in the What's Next section after the project list. These are idea cards, not tracked projects, so they do not affect active, completed, scheduled, online, or review counts.
 
 Configured source roots live in:
 
@@ -83,6 +87,32 @@ This file is machine-specific and gitignored; without it no roots are scanned. C
 }
 ```
 
+## Scheduled Tasks
+
+The Scheduled tab reflects two runners:
+
+- **Codex automations**, discovered from `$CODEX_HOME/automations/*/automation.toml` (default `~/.codex/automations`). Each automation becomes a card with its real name, status, recurrence rule, target workspace, model, and prompt.
+- **Claude Code scheduled tasks**, discovered by scanning the Claude Code sessions directory for `scheduled-tasks.json` registries. The location defaults to the Claude app's sessions folder and can be overridden with `CLAUDE_SESSIONS_DIR`. A task whose id matches a tracked project attaches to that project's card; the rest get standalone cards.
+
+Cards are read-only reflections of the runner's own state, except for three explicit controls:
+
+- **Pause / Resume** edits the runner's own record: the `status` literal in the Codex automation TOML, or the `enabled` flag in the Claude task registry. Nothing else in those files is touched, and writes are atomic.
+- **Run now** spawns a real agent process on this machine. Be aware of what that means before you press it:
+  - a Codex automation runs via `codex exec` with the automation's own prompt, model, and working directory;
+  - a Claude task runs via `claude -p` with the task's prompt, restricted to the `Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,Skill` tools (no Bash, no MCP connectors);
+  - the process is detached, capped at one concurrent run per task with a 30 minute timeout, and its log is written under `data/automation-runs/`;
+  - neither app exposes an external trigger for the real schedule record, so dashboard-triggered runs do not appear in the apps' own histories.
+
+## Security Model
+
+This dashboard has no built-in authentication and its API exposes local absolute paths, git remotes, notes, and an endpoint that launches agent runs. It is designed to be reachable from this machine only:
+
+- The server binds `127.0.0.1` by default and refuses to start on a non-loopback `HOST` unless `DASHBOARD_ALLOW_REMOTE=1` is set explicitly.
+- Every request's `Host` header is checked against a fixed allowlist (a DNS-rebinding guard). A reverse proxy or tunnel hostname must be added via `DASHBOARD_ALLOWED_HOSTS` (comma-separated).
+- Mutating requests are same-origin only; cross-origin writes are rejected against the same fixed allowlist, not the request's own headers.
+
+If you want the dashboard reachable from anywhere, do not expose the port directly. Put an authenticating proxy in front of it (for example a Cloudflare Tunnel with Access, or a reverse proxy with SSO), keep the server itself on loopback, and add the public hostname to `DASHBOARD_ALLOWED_HOSTS`.
+
 ## Project Source Of Truth
 
 `data/dashboard.config.json` is only the dashboard index. It is generated/merged from:
@@ -91,6 +121,7 @@ This file is machine-specific and gitignored; without it no roots are scanned. C
 - local git metadata
 - each project's `.project-status.json`
 - Codex automation files under `$CODEX_HOME/automations`
+- Claude Code scheduled-task registries
 - existing dashboard index entries that are outside the scanned roots
 
 For real project status, add this file inside each project root:
@@ -149,16 +180,16 @@ Use these agent-writable status values:
 - `maintenance`: shipped but still alive
 - `completed`: done and shown in completed projects
 
-`scheduled` is a dashboard group derived from Codex automation files; agents should not write `status: "scheduled"` in project status files.
+`scheduled` is a dashboard group derived from automation and task records; agents should not write `status: "scheduled"` in project status files.
 
 Do not use natural-language aliases such as `done`, `working`, `testing`, `in progress`, or `on hold` in source files. The dashboard normalizes common aliases defensively:
 
-- `done`, `finished`, `shipped` -> `completed`
-- `idea`, `backlog`, `planned` -> `planning`
-- `building`, `testing`, `implementing`, `coding` -> `building`
-- `working`, `in progress`, `activated` -> `active`
-- `live` -> `maintenance`
-- `hold`, `on hold`, `deferred` -> `paused`
+- `done`, `finished`, `shipped` become `completed`
+- `idea`, `backlog`, `planned` become `planning`
+- `building`, `testing`, `implementing`, `coding` become `building`
+- `working`, `in progress`, `activated` become `active`
+- `live` becomes `maintenance`
+- `hold`, `on hold`, `deferred` become `paused`
 
 If an agent writes an unrecognized status, the sync layer normalizes it to `active` and marks the generated dashboard record with `needs-review` and `status-normalized` tags. That prevents accidental new dashboard groups while still making the uncertainty visible.
 

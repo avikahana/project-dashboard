@@ -189,7 +189,20 @@ A good idea card should include:
 - what the first concrete experiment would be
 - whether it needs a repo, research note, or no action yet
 
-## Recipe 10: Use The Dashboard As An Operating Ritual
+## Recipe 10: Treat Run Buttons As Real Agent Launches
+
+If the dashboard mirrors scheduled agent tasks (Codex automations, Claude Code scheduled tasks), a "Run now" button is not a UI refresh. It spawns a real CLI agent process on the host machine with the task's own prompt and working directory.
+
+Design rules that keep this sane:
+
+- Ask for confirmation before every run, and name the runner in the prompt.
+- Pin the agent's tool allowlist server-side, so a task prompt cannot escalate to shell access or external connectors.
+- Allow one concurrent run per task, with a hard timeout.
+- Log every run to a file and show the outcome on the card.
+- Keep pause/resume edits surgical: flip only the one field the runner owns, write atomically, and change nothing else in the runner's files.
+- Never expose any of this beyond loopback without an authenticating proxy in front.
+
+## Recipe 11: Use The Dashboard As An Operating Ritual
 
 The ritual is the product:
 
@@ -229,12 +242,16 @@ It is less about a dashboard and more about making continuity visible.
 
 ```text
 dashboard/
+  server.mjs
   public/
     index.html
     app.js
     styles.css
   lib/
     project-sync.mjs
+    claude-tasks.mjs
+    automation-actions.mjs
+    json-files.mjs
   scripts/
     sync-projects.mjs
   data/

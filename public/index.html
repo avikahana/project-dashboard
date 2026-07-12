@@ -54,48 +54,40 @@
 
       <section id="online-section" class="online-section" aria-label="Online sites" hidden></section>
 
-      <section class="control-band" aria-label="Dashboard filters">
-        <div class="filter-stack">
-          <div class="tabs source-tabs" role="tablist" aria-label="Project source filters">
-            <button class="tab source-tab" type="button" data-source-filter="claude">Claude</button>
-            <button class="tab source-tab" type="button" data-source-filter="codex">Codex</button>
-            <button class="tab source-tab is-active" type="button" data-source-filter="all">All</button>
-          </div>
-          <div class="tabs status-tabs" role="tablist" aria-label="Project status filters">
-            <button class="tab status-tab is-active" type="button" data-status-filter="all">All</button>
-            <button class="tab status-tab" type="button" data-status-filter="ongoing">Ongoing</button>
-            <button class="tab status-tab" type="button" data-status-filter="completed">Completed</button>
-            <button class="tab status-tab" type="button" data-status-filter="online">Online</button>
-            <button class="tab status-tab" type="button" data-status-filter="review">Needs review</button>
-            <button class="tab status-tab" type="button" data-status-filter="duplicates">Duplicates</button>
-            <button class="tab status-tab" type="button" data-status-filter="checklist">Checklist</button>
-          </div>
-        </div>
-        <label class="search">
-          <span>Search</span>
-          <input id="search" type="search" placeholder="Project, tag, path, repo">
-        </label>
-      </section>
-
       <section class="board">
-        <aside class="rail" aria-label="Legend">
-          <div class="rail-line"></div>
-          <div class="legend-block">
-            <span class="legend-title">Progress</span>
-            <p>Set by hand. Milestones explain the number.</p>
-          </div>
-          <div class="legend-block">
-            <span class="legend-title">Evidence</span>
-            <p>Git, local paths, and live checks support the story.</p>
-          </div>
-          <div class="legend-block">
-            <span class="legend-title">Live health</span>
-            <p>Website or bot uptime. Separate from progress.</p>
-          </div>
+        <aside class="rail" aria-label="Dashboard views">
+          <nav class="view-nav" role="tablist" aria-label="Dashboard views">
+            <button class="tab view-tab is-active" type="button" data-view="projects">Tracked projects</button>
+            <button class="tab view-tab" type="button" data-view="scheduled">Scheduled</button>
+            <button class="tab view-tab" type="button" data-view="next">What's next</button>
+            <button class="tab view-tab" type="button" data-view="online">Online</button>
+            <button class="tab view-tab" type="button" data-view="checklists">Checklists</button>
+          </nav>
         </aside>
 
         <div class="content">
-          <div class="section-head">
+          <section class="control-band" aria-label="Dashboard filters">
+            <div class="filter-stack">
+              <div class="tabs source-tabs" role="tablist" aria-label="Project source filters">
+                <button class="tab source-tab" type="button" data-source-filter="claude">Claude</button>
+                <button class="tab source-tab" type="button" data-source-filter="codex">Codex</button>
+                <button class="tab source-tab is-active" type="button" data-source-filter="all">All</button>
+              </div>
+              <div class="tabs status-tabs" role="tablist" aria-label="Project status filters">
+                <button class="tab status-tab is-active" type="button" data-status-filter="all">All</button>
+                <button class="tab status-tab" type="button" data-status-filter="ongoing">Ongoing</button>
+                <button class="tab status-tab" type="button" data-status-filter="completed">Completed</button>
+                <button class="tab status-tab" type="button" data-status-filter="review">Needs review</button>
+                <button class="tab status-tab" type="button" data-status-filter="duplicates">Duplicates</button>
+              </div>
+            </div>
+            <label class="search">
+              <span>Search</span>
+              <input id="search" type="search" placeholder="Project, tag, path, repo">
+            </label>
+          </section>
+
+          <div class="section-head" id="projects-head">
             <div>
               <p class="eyebrow" id="view-eyebrow">Ongoing projects</p>
               <h2 id="view-title">Current work</h2>
@@ -111,18 +103,17 @@
             </div>
           </div>
 
-          <div id="project-list" class="project-list" aria-live="polite"></div>
-
-          <section id="checklist-panel" class="checklist-panel" aria-label="Checklist" hidden>
-            <div class="checklist-head">
-              <p class="checklist-summary" id="checklist-summary">No checklist items yet.</p>
-              <div class="progress-track checklist-track" aria-hidden="true">
-                <span id="checklist-bar"></span>
+          <section class="scheduled-band" id="scheduled-band" aria-label="Scheduled task filters" hidden>
+            <div class="filter-stack">
+              <div class="tabs source-tabs" role="tablist" aria-label="Scheduled task source filters">
+                <button class="tab scheduled-source-tab" type="button" data-scheduled-source="claude">Claude</button>
+                <button class="tab scheduled-source-tab" type="button" data-scheduled-source="codex">Codex</button>
+                <button class="tab scheduled-source-tab is-active" type="button" data-scheduled-source="all">All</button>
               </div>
             </div>
-            <p class="checklist-description" id="checklist-description" hidden></p>
-            <div id="checklist-groups" class="checklist-groups"></div>
           </section>
+
+          <div id="project-list" class="project-list" aria-live="polite"></div>
 
           <section id="completed-panel" class="completed-panel" hidden>
             <div class="section-head compact">
@@ -136,18 +127,11 @@
           </section>
 
           <section class="next-projects" id="next-projects" aria-label="Next project suggestions" hidden>
-            <div class="section-head compact">
-              <div>
-                <p class="eyebrow">What's next</p>
-                <h2>Project suggestions</h2>
-              </div>
-              <div class="next-project-actions">
-                <p class="timestamp" id="next-project-count">0 ideas</p>
-                <button class="button" id="toggle-next-projects" type="button" hidden>Show more</button>
-              </div>
-            </div>
             <div class="next-project-list" id="next-project-list"></div>
+            <button class="button" id="toggle-next-projects" type="button" hidden>Show more</button>
           </section>
+
+          <section id="checklists-view" class="checklists-view" aria-label="Checklists" hidden></section>
         </div>
       </section>
     </main>
