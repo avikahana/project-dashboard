@@ -436,7 +436,7 @@ async function handleApi(req, res, requestUrl) {
   // data/dashboard.config.json and the target status is whitelisted in the
   // route itself; the status file path comes from the matched config entry,
   // never from the request.
-  const moveMatch = requestUrl.pathname.match(/^\/api\/projects\/([A-Za-z0-9._-]+)\/move\/(active|building|maintenance|planning|paused|blocked|completed)$/);
+  const moveMatch = requestUrl.pathname.match(/^\/api\/projects\/([A-Za-z0-9._-]+)\/move\/(active|maintenance|planning|paused|blocked|completed)$/);
   if (moveMatch) {
     const [, moveProjectId, targetStatus] = moveMatch;
     if (req.method !== "POST") {

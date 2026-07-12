@@ -117,7 +117,7 @@ const sourceDisplayLabels = {
 // Order and display labels for the collapsible status groups.
 const PRIVATE_GROUP_KEY = "private-list";
 const PINNED_GROUP_KEY = "pinned-projects";
-const GROUP_ORDER = [PINNED_GROUP_KEY, "active", "scheduled", "building", "maintenance", "planning", "paused", "blocked", "completed", PRIVATE_GROUP_KEY];
+const GROUP_ORDER = [PINNED_GROUP_KEY, "active", "scheduled", "maintenance", "planning", "paused", "blocked", "completed", PRIVATE_GROUP_KEY];
 
 function isScheduledProject(project) {
   const tags = new Set((project.tags || []).map((tag) => String(tag).toLowerCase()));
@@ -216,8 +216,7 @@ function statusClass(value = "") {
   if (!normalized) return "";
   if (["complete", "completed", "done", "finished", "shipped", "closed", "resolved"].includes(normalized)) return "completed";
   if (["idea", "backlog", "planned", "planning", "proposed", "proposal", "todo", "not-started"].includes(normalized)) return "planning";
-  if (["build", "building", "development", "developing", "develop", "implementation", "implementing", "implement", "code", "coding", "test", "testing", "wip"].includes(normalized)) return "building";
-  if (["active", "activate", "activated", "activation", "ongoing", "in-progress", "working", "started", "open", "current"].includes(normalized)) return "active";
+  if (["build", "building", "development", "developing", "develop", "implementation", "implementing", "implement", "code", "coding", "test", "testing", "wip", "active", "activate", "activated", "activation", "ongoing", "in-progress", "working", "started", "open", "current"].includes(normalized)) return "active";
   if (["blocked", "blocker", "stuck", "waiting", "waiting-on", "needs-input"].includes(normalized)) return "blocked";
   if (["pause", "paused", "hold", "on-hold", "deferred", "parked", "shelved", "archived"].includes(normalized)) return "paused";
   if (["live", "production", "prod", "maintain", "maintaining", "maintenance"].includes(normalized)) return "maintenance";
@@ -566,7 +565,6 @@ function automationActionUrl(project, action) {
 // automation-only, so none of them appear here.
 const MOVE_TARGETS = [
   ["active", "Active"],
-  ["building", "Building"],
   ["maintenance", "Maintenance"],
   ["planning", "Planning"],
   ["paused", "Paused"],

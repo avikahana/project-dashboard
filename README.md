@@ -30,7 +30,7 @@ The app has no third-party package dependencies. It uses Node's built-in HTTP se
 
 The page base, visible on every tab, is the metric strip (Ongoing, Planning, Scheduled, Completed, Online, Needs review) with the Online strip directly under it. Below that, a left rail switches between five views:
 
-- **Tracked projects**: the grouped project list (pinned, active, building, planning, paused, blocked, completed, private), with source and status filters, search, and sorting. Each row expands into the full project card. The row menu's **Move to** submenu moves a card to another status group by rewriting the `status` field in that project's own `.project-status.json` on disk (moving to Completed stamps `completedAt`, moving out clears it); its **Private** target, like Pin, is browser-local visibility only and changes no files. Group targets appear only on cards that have a status file.
+- **Tracked projects**: the grouped project list (pinned, active, planning, paused, blocked, completed, private), with source and status filters, search, and sorting. Each row expands into the full project card. The row menu's **Move to** submenu moves a card to another status group by rewriting the `status` field in that project's own `.project-status.json` on disk (moving to Completed stamps `completedAt`, moving out clears it); its **Private** target, like Pin, is browser-local visibility only and changes no files. Group targets appear only on cards that have a status file.
 - **Scheduled**: Codex automations and Claude Code scheduled tasks, with a Claude/Codex/All filter and per-task controls (see Scheduled Tasks below).
 - **What's next**: idea rows from `data/next-projects.json`. These are suggestions, not tracked projects, and do not affect any counts. Each row has two actions: **Dismiss** hides the suggestion (its `status` flips to `dismissed` in the file; restore by editing the file), and **Start** promotes it, creating a new project home folder containing a planning `.project-status.json` and syncing it onto the Tracked board. Start writes a real folder on this machine, under `DASHBOARD_NEW_PROJECT_ROOT` if set, otherwise the first root in `data/dashboard.sources.json`.
 - **Online**: one expandable row per project with a `liveUrl` or `healthCheckUrl`, showing the full latest health result.
@@ -132,7 +132,7 @@ For real project status, add this file inside each project root:
 
 Use specific names when one product has multiple homes. For example, use `Token Optimizer Product Repo` and `Token Optimizer Brain` instead of naming both folders `Token Optimizer`.
 
-Moving a card between dashboard groups is controlled by the exact `status` value in that file. Use only `planning`, `active`, `building`, `blocked`, `paused`, `maintenance`, or `completed`.
+Moving a card between dashboard groups is controlled by the exact `status` value in that file. Use only `planning`, `active`, `blocked`, `paused`, `maintenance`, or `completed`.
 
 Example:
 
@@ -173,8 +173,7 @@ Progress is intentionally hybrid:
 Use these agent-writable status values:
 
 - `planning`: not implemented yet, but intentionally tracked
-- `active`: currently alive or being actively considered
-- `building`: implementation, testing, or other hands-on construction work
+- `active`: currently alive, under construction, or being actively considered
 - `blocked`: waiting on something
 - `paused`: intentionally not active
 - `maintenance`: shipped but still alive
@@ -186,8 +185,7 @@ Do not use natural-language aliases such as `done`, `working`, `testing`, `in pr
 
 - `done`, `finished`, `shipped` become `completed`
 - `idea`, `backlog`, `planned` become `planning`
-- `building`, `testing`, `implementing`, `coding` become `building`
-- `working`, `in progress`, `activated` become `active`
+- `building`, `testing`, `implementing`, `coding`, `working`, `in progress`, `activated` become `active`
 - `live` becomes `maintenance`
 - `hold`, `on hold`, `deferred` become `paused`
 
