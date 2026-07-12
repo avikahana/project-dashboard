@@ -39,6 +39,7 @@ const state = {
   checkedNextSteps: readStoredSet(CHECKED_NEXT_STEPS_KEY),
   activeMenuProjectId: null,
   activeStatusMenuProjectId: null,
+  moveMenuProjectId: null,
   healthById: new Map(),
   automationRuns: new Map(),
   toastTimer: null,
@@ -560,6 +561,31 @@ function automationActionUrl(project, action) {
   return `/api/automations/${encodeURIComponent(automationApiId(project))}/${action}?runner=${automationRunner(project)}`;
 }
 
+// Move targets are the canonical group words statusClass() maps to. Pinned
+// and Private are browser-local toggles, not statuses, and Scheduled is
+// automation-only, so none of them appear here.
+const MOVE_TARGETS = [
+  ["active", "Active"],
+  ["building", "Building"],
+  ["maintenance", "Maintenance"],
+  ["planning", "Planning"],
+  ["paused", "Paused"],
+  ["blocked", "Blocked"],
+  ["completed", "Completed"]
+];
+
+async function moveProjectToGroup(project, status, label) {
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId(project))}/move/${status}`, { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `Move failed: ${response.status}`);
+    showToast(`${project.name || "Project"} moved to ${label}`);
+    await loadProjects({ quiet: true, force: true });
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 async function postAutomationAction(project, action) {
   const response = await fetch(automationActionUrl(project, action), { method: "POST" });
   const payload = await response.json().catch(() => ({}));
@@ -867,6 +893,7 @@ function renderCompactRow(project) {
   menuButton.addEventListener("click", (event) => {
     event.stopPropagation();
     state.activeMenuProjectId = state.activeMenuProjectId === id ? null : id;
+    state.moveMenuProjectId = null;
     render();
   });
 
@@ -907,25 +934,74 @@ function renderCompactRow(project) {
       render();
     });
 
-    const privacyButton = document.createElement("button");
-    privacyButton.type = "button";
-    privacyButton.setAttribute("role", "menuitem");
-    privacyButton.textContent = hidden ? "Show in groups" : "Move to private";
-    privacyButton.addEventListener("click", () => {
-      if (hidden) {
-        state.hiddenProjects.delete(id);
-      } else {
-        state.hiddenProjects.add(id);
-        state.pinnedProjects.delete(id);
-        savePinnedProjects();
-      }
-      state.activeMenuProjectId = null;
-      state.expandedProjects.delete(id);
-      saveHiddenProjects();
+    menu.append(shareButton, pinButton);
+
+    const moveOpen = state.moveMenuProjectId === id;
+    const moveButton = document.createElement("button");
+    moveButton.type = "button";
+    moveButton.setAttribute("role", "menuitem");
+    moveButton.setAttribute("aria-haspopup", "menu");
+    moveButton.setAttribute("aria-expanded", String(moveOpen));
+    moveButton.textContent = moveOpen ? "Move to ▴" : "Move to ▾";
+    moveButton.addEventListener("click", () => {
+      state.moveMenuProjectId = moveOpen ? null : id;
       render();
     });
+    menu.append(moveButton);
 
-    menu.append(shareButton, pinButton, privacyButton);
+    if (moveOpen) {
+      const subItem = (label, onPick) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.setAttribute("role", "menuitem");
+        item.className = "row-menu-subitem";
+        item.textContent = label;
+        item.addEventListener("click", () => {
+          state.activeMenuProjectId = null;
+          state.moveMenuProjectId = null;
+          onPick();
+        });
+        return item;
+      };
+
+      if (hidden) {
+        menu.append(subItem("Show in groups", () => {
+          state.hiddenProjects.delete(id);
+          saveHiddenProjects();
+          render();
+        }));
+      }
+
+      // Group moves rewrite the project's own .project-status.json, so they
+      // need one; scheduled cards keep their registry-backed status dropdown
+      // instead. Picking a group for a private card also brings it back.
+      if (project.statusFile && !isScheduledProject(project)) {
+        MOVE_TARGETS.filter(([value]) => value !== statusClass(project.status)).forEach(([value, label]) => {
+          menu.append(subItem(label, () => {
+            if (hidden) {
+              state.hiddenProjects.delete(id);
+              saveHiddenProjects();
+            }
+            render();
+            moveProjectToGroup(project, value, label);
+          }));
+        });
+      }
+
+      // Private is browser-local visibility, not a status, so it changes no
+      // files and stays available on every card.
+      if (!hidden) {
+        menu.append(subItem("Private", () => {
+          state.hiddenProjects.add(id);
+          state.pinnedProjects.delete(id);
+          savePinnedProjects();
+          state.expandedProjects.delete(id);
+          saveHiddenProjects();
+          render();
+        }));
+      }
+    }
+
     menuWrap.append(menu);
   }
 
@@ -1818,6 +1894,7 @@ document.addEventListener("click", () => {
   if (!state.activeMenuProjectId && !state.activeStatusMenuProjectId) return;
   state.activeMenuProjectId = null;
   state.activeStatusMenuProjectId = null;
+  state.moveMenuProjectId = null;
   render();
 });
 

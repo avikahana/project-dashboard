@@ -1095,6 +1095,20 @@ button.link-pill:disabled {
   background: var(--panel-soft);
 }
 
+.row-menu button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.row-menu button:disabled:hover {
+  background: transparent;
+}
+
+.row-menu .row-menu-subitem {
+  padding-left: 26px;
+  font-weight: 700;
+}
+
 .row-chevron {
   color: var(--muted);
   font-size: 1rem;

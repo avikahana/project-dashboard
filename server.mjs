@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mergeProjectStatusFile, syncProjects } from "./lib/project-sync.mjs";
+import { mergeProjectStatusFile, moveProjectStatus, syncProjects } from "./lib/project-sync.mjs";
 import { getLastRun, runAutomation, setAutomationStatus } from "./lib/automation-actions.mjs";
 import { dismissSuggestion, startSuggestion } from "./lib/next-projects.mjs";
 
@@ -424,6 +424,35 @@ async function handleApi(req, res, requestUrl) {
         return;
       }
       if (error.code === "NO_ROOT" || error.code === "NO_SLUG") {
+        sendJson(res, 400, { error: error.message });
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
+
+  // Tracked-card group moves. The id is only matched against projects in
+  // data/dashboard.config.json and the target status is whitelisted in the
+  // route itself; the status file path comes from the matched config entry,
+  // never from the request.
+  const moveMatch = requestUrl.pathname.match(/^\/api\/projects\/([A-Za-z0-9._-]+)\/move\/(active|building|maintenance|planning|paused|blocked|completed)$/);
+  if (moveMatch) {
+    const [, moveProjectId, targetStatus] = moveMatch;
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "Use POST for move" });
+      return;
+    }
+    try {
+      const result = await moveProjectStatus(moveProjectId, targetStatus);
+      if (!result) {
+        sendJson(res, 404, { error: `Unknown project: ${moveProjectId}` });
+        return;
+      }
+      invalidateProjectsCache();
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (error) {
+      if (error.code === "NO_STATUS_FILE" || error.code === "BAD_STATUS") {
         sendJson(res, 400, { error: error.message });
         return;
       }
