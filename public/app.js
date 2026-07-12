@@ -1321,6 +1321,35 @@ function nextProjectKey(item, index) {
 
 // Suggestions share the tracked-list row look: collapsed row with chevron,
 // dot, title and meta, Copy idea on the right, details in the expanded body.
+async function postNextProjectAction(item, action) {
+  const response = await fetch(`/api/next-projects/${encodeURIComponent(item.id)}/${action}`, { method: "POST" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `${action} failed: ${response.status}`);
+  return payload;
+}
+
+function createNextProjectActionButton(item, action, label, confirmText, doneToast) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "copy-button";
+  button.textContent = label;
+  button.addEventListener("click", async () => {
+    if (!window.confirm(confirmText)) return;
+    button.disabled = true;
+    try {
+      await postNextProjectAction(item, action);
+      showToast(doneToast);
+      await loadNextProjects();
+      // Start runs a sync server-side; refresh so the new card shows up.
+      if (action === "start") await loadProjects({ quiet: true, force: true });
+    } catch (error) {
+      showToast(error.message);
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
 function renderNextProject(item, index) {
   const key = nextProjectKey(item, index);
   const expanded = state.expandedNextProjects.has(key);
@@ -1368,7 +1397,23 @@ function renderNextProject(item, index) {
 
   const actions = document.createElement("div");
   actions.className = "row-actions";
-  actions.append(createCopyButton("Copy idea", buildNextProjectContext(item)));
+  actions.append(
+    createNextProjectActionButton(
+      item,
+      "start",
+      "Start",
+      `Start "${item.title}"? This creates a project home folder with a planning status file and adds it to the Tracked board.`,
+      "Project started"
+    ),
+    createCopyButton("Copy idea", buildNextProjectContext(item)),
+    createNextProjectActionButton(
+      item,
+      "dismiss",
+      "Dismiss",
+      `Dismiss "${item.title}"? It disappears from this list; restoring means editing data/next-projects.json.`,
+      "Suggestion dismissed"
+    )
+  );
 
   rowHead.append(trigger, actions);
   row.append(rowHead);
@@ -1423,10 +1468,22 @@ function renderNextProjects() {
 
 // Checklists tab, first list: one item per project card's next action.
 // Check state is local-only (browser localStorage), it never edits the
-// project's own nextAction.
+// project's own nextAction. Keys include a hash of the nextAction text so
+// a changed next action resets its checkbox instead of staying stale-checked.
+function hashText(text) {
+  let hash = 5381;
+  for (let i = 0; i < text.length; i += 1) hash = ((hash << 5) + hash + text.charCodeAt(i)) >>> 0;
+  return hash.toString(36);
+}
+
+function nextStepKey(project) {
+  return `${projectId(project)}::${hashText(String(project.nextAction || "").trim())}`;
+}
+
 function renderNextStepRow(project) {
   const id = projectId(project);
-  const checked = state.checkedNextSteps.has(id);
+  const checkKey = nextStepKey(project);
+  const checked = state.checkedNextSteps.has(checkKey);
   const expanded = state.expandedNextSteps.has(id);
 
   const row = document.createElement("div");
@@ -1439,8 +1496,8 @@ function renderNextStepRow(project) {
   checkbox.className = "check-box";
   checkbox.checked = checked;
   checkbox.addEventListener("change", () => {
-    if (state.checkedNextSteps.has(id)) state.checkedNextSteps.delete(id);
-    else state.checkedNextSteps.add(id);
+    if (state.checkedNextSteps.has(checkKey)) state.checkedNextSteps.delete(checkKey);
+    else state.checkedNextSteps.add(checkKey);
     saveCheckedNextSteps();
     renderChecklistsView();
   });
@@ -1486,7 +1543,11 @@ function renderChecklistsView() {
 
   const items = state.projects
     .filter((project) => !state.hiddenProjects.has(projectId(project)))
-    .filter((project) => String(project.nextAction || "").trim())
+    .filter((project) => !isScheduledProject(project))
+    .filter((project) => {
+      const action = String(project.nextAction || "").trim();
+      return action && !/^none\b/i.test(action);
+    })
     .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
 
   if (items.length === 0) {
@@ -1629,7 +1690,10 @@ async function loadNextProjects() {
   const response = await fetch("/api/next-projects");
   if (!response.ok) throw new Error(`Next project load failed: ${response.status}`);
   const payload = await response.json();
-  state.nextProjects = Array.isArray(payload.suggestions) ? payload.suggestions : [];
+  // Dismissed and started suggestions leave the list; the file keeps them
+  // (status flip only), so restoring a dismissal is a hand edit there.
+  state.nextProjects = (Array.isArray(payload.suggestions) ? payload.suggestions : [])
+    .filter((item) => !["dismissed", "started"].includes(String(item.status || "").toLowerCase()));
   renderNextProjects();
 }
 

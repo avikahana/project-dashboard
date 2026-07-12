@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mergeProjectStatusFile, syncProjects } from "./lib/project-sync.mjs";
 import { getLastRun, runAutomation, setAutomationStatus } from "./lib/automation-actions.mjs";
+import { dismissSuggestion, startSuggestion } from "./lib/next-projects.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
@@ -382,6 +383,52 @@ async function handleApi(req, res, requestUrl) {
       if (error.code !== "ENOENT") throw error;
     }
     sendJson(res, 200, payload);
+    return;
+  }
+
+  // What's next suggestion actions. Like the automation routes, the id is
+  // only matched against entries in data/next-projects.json; it never reaches
+  // the filesystem directly (start derives the folder name from the matched
+  // suggestion's title, not from the request).
+  const nextProjectMatch = requestUrl.pathname.match(/^\/api\/next-projects\/([A-Za-z0-9._-]+)\/(dismiss|start)$/);
+  if (nextProjectMatch) {
+    const [, suggestionId, action] = nextProjectMatch;
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: `Use POST for ${action}` });
+      return;
+    }
+
+    if (action === "dismiss") {
+      const result = await dismissSuggestion(suggestionId);
+      if (!result) {
+        sendJson(res, 404, { error: `Unknown suggestion: ${suggestionId}` });
+        return;
+      }
+      sendJson(res, 200, { ok: true, suggestion: result.suggestion });
+      return;
+    }
+
+    try {
+      const result = await startSuggestion(suggestionId);
+      if (!result) {
+        sendJson(res, 404, { error: `Unknown suggestion: ${suggestionId}` });
+        return;
+      }
+      // Sync so the new project home appears on the Tracked board right away.
+      await syncProjects({ write: true });
+      invalidateProjectsCache();
+      sendJson(res, 200, { ok: true, suggestion: result.suggestion, projectPath: result.projectPath });
+    } catch (error) {
+      if (error.code === "EEXISTS") {
+        sendJson(res, 409, { error: error.message });
+        return;
+      }
+      if (error.code === "NO_ROOT" || error.code === "NO_SLUG") {
+        sendJson(res, 400, { error: error.message });
+        return;
+      }
+      throw error;
+    }
     return;
   }
 

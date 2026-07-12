@@ -32,7 +32,7 @@ The page base, visible on every tab, is the metric strip (Ongoing, Planning, Sch
 
 - **Tracked projects**: the grouped project list (pinned, active, building, planning, paused, blocked, completed, private), with source and status filters, search, and sorting. Each row expands into the full project card.
 - **Scheduled**: Codex automations and Claude Code scheduled tasks, with a Claude/Codex/All filter and per-task controls (see Scheduled Tasks below).
-- **What's next**: idea cards from `data/next-projects.json`. These are suggestions, not tracked projects, and do not affect any counts.
+- **What's next**: idea rows from `data/next-projects.json`. These are suggestions, not tracked projects, and do not affect any counts. Each row has two actions: **Dismiss** hides the suggestion (its `status` flips to `dismissed` in the file; restore by editing the file), and **Start** promotes it, creating a new project home folder containing a planning `.project-status.json` and syncing it onto the Tracked board. Start writes a real folder on this machine, under `DASHBOARD_NEW_PROJECT_ROOT` if set, otherwise the first root in `data/dashboard.sources.json`.
 - **Online**: one expandable row per project with a `liveUrl` or `healthCheckUrl`, showing the full latest health result.
 - **Checklists**: a per-project next-step list built from each card's `nextAction`. Check state is browser-local only and never edits the project's own files.
 
