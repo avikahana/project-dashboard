@@ -1,0 +1,16 @@
+{
+  "_comment": "Merge this Stop entry into the hooks object of ~/.claude/settings.json (drop this _comment key). If a Stop array already exists, append the matcher object to it. Adjust the script path to wherever you copied hooks/status-stop-hook.mjs.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/.claude/hooks/status-stop-hook.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

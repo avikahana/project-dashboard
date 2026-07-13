@@ -103,6 +103,18 @@ Cards are read-only reflections of the runner's own state, except for three expl
   - the process is detached, capped at one concurrent run per task with a 30 minute timeout, and its log is written under `data/automation-runs/`;
   - neither app exposes an external trigger for the real schedule record, so dashboard-triggered runs do not appear in the apps' own histories.
 
+## Enforcement (Optional)
+
+The board stays truthful only if agents actually update `.project-status.json` when they
+finish working. `hooks/status-stop-hook.mjs` is an optional Claude Code Stop hook that
+makes this structural instead of conventional: a session that changed files inside a
+tracked project is blocked from finishing until it updates that project's status file.
+One nudge per stop, silent on sessions that touched no tracked project, fail-open on any
+error, zero dependencies, zero model tokens except when a block lands. Install, split-layout
+config, and the test suite (`node scripts/test-stop-hook.mjs`) are documented in
+[docs/enforcement.md](docs/enforcement.md). Codex has no hook system; Codex sessions stay
+on your standing instruction.
+
 ## Security Model
 
 This dashboard has no built-in authentication and its API exposes local absolute paths, git remotes, notes, and an endpoint that launches agent runs. It is designed to be reachable from this machine only:
