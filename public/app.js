@@ -174,8 +174,52 @@ function projectId(project) {
   return project.id || project.statusFile || project.localPath || project.name;
 }
 
-function saveHiddenProjects() {
-  localStorage.setItem(HIDDEN_PROJECTS_KEY, JSON.stringify([...state.hiddenProjects]));
+// The Private list is server-persisted (data/dashboard.prefs.json) so hiding
+// a project holds on every origin the dashboard is reached from; localStorage
+// is per-origin and only read once here as a legacy fallback until the first
+// /api/projects response migrates it up to the server.
+async function setProjectPrivacy(id, hidden) {
+  if (hidden) {
+    state.hiddenProjects.add(id);
+  } else {
+    state.hiddenProjects.delete(id);
+  }
+  render();
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(id)}/${hidden ? "hide" : "unhide"}`, { method: "POST" });
+    if (!response.ok) throw new Error(`Privacy update failed: ${response.status}`);
+    const payload = await response.json();
+    if (Array.isArray(payload.hiddenProjects)) {
+      state.hiddenProjects = new Set(payload.hiddenProjects);
+      render();
+    }
+  } catch (error) {
+    if (hidden) {
+      state.hiddenProjects.delete(id);
+    } else {
+      state.hiddenProjects.add(id);
+    }
+    render();
+    showToast(error.message);
+  }
+}
+
+// One-time migration: entries this browser still holds in localStorage are
+// pushed up to the server, then the legacy key is dropped. Unioning the
+// per-origin lists is the point: localhost and the tunnel hostname finally
+// agree on what is private.
+function applyServerHiddenList(serverList) {
+  if (!Array.isArray(serverList)) return;
+  const merged = new Set(serverList);
+  const legacy = readStoredSet(HIDDEN_PROJECTS_KEY);
+  if (legacy.size) {
+    localStorage.removeItem(HIDDEN_PROJECTS_KEY);
+    [...legacy].filter((id) => !merged.has(id)).forEach((id) => {
+      merged.add(id);
+      fetch(`/api/projects/${encodeURIComponent(id)}/hide`, { method: "POST" }).catch(() => {});
+    });
+  }
+  state.hiddenProjects = merged;
 }
 
 function savePinnedProjects() {
@@ -561,8 +605,8 @@ function automationActionUrl(project, action) {
 }
 
 // Move targets are the canonical group words statusClass() maps to. Pinned
-// and Private are browser-local toggles, not statuses, and Scheduled is
-// automation-only, so none of them appear here.
+// (browser-local) and Private (server-persisted prefs) are toggles, not
+// statuses, and Scheduled is automation-only, so none of them appear here.
 const MOVE_TARGETS = [
   ["active", "Active"],
   ["maintenance", "Maintenance"],
@@ -924,8 +968,7 @@ function renderCompactRow(project) {
         state.pinnedProjects.delete(id);
       } else {
         state.pinnedProjects.add(id);
-        state.hiddenProjects.delete(id);
-        saveHiddenProjects();
+        if (state.hiddenProjects.has(id)) setProjectPrivacy(id, false);
       }
       state.activeMenuProjectId = null;
       savePinnedProjects();
@@ -964,9 +1007,7 @@ function renderCompactRow(project) {
 
       if (hidden) {
         menu.append(subItem("Show in groups", () => {
-          state.hiddenProjects.delete(id);
-          saveHiddenProjects();
-          render();
+          setProjectPrivacy(id, false);
         }));
       }
 
@@ -977,25 +1018,23 @@ function renderCompactRow(project) {
         MOVE_TARGETS.filter(([value]) => value !== statusClass(project.status)).forEach(([value, label]) => {
           menu.append(subItem(label, () => {
             if (hidden) {
-              state.hiddenProjects.delete(id);
-              saveHiddenProjects();
+              setProjectPrivacy(id, false);
+            } else {
+              render();
             }
-            render();
             moveProjectToGroup(project, value, label);
           }));
         });
       }
 
-      // Private is browser-local visibility, not a status, so it changes no
-      // files and stays available on every card.
+      // Private is visibility, not a status: it changes no status files, only
+      // the server-side prefs list, and stays available on every card.
       if (!hidden) {
         menu.append(subItem("Private", () => {
-          state.hiddenProjects.add(id);
           state.pinnedProjects.delete(id);
           savePinnedProjects();
           state.expandedProjects.delete(id);
-          saveHiddenProjects();
-          render();
+          setProjectPrivacy(id, true);
         }));
       }
     }
@@ -1793,6 +1832,7 @@ async function loadProjects({ includeHealth = false, quiet = false, force = fals
     state.projects = annotateProjectRelationships(incoming).map((project) => (
       project.health ? project : { ...project, health: state.healthById.get(projectId(project)) || null }
     ));
+    applyServerHiddenList(payload.hiddenProjects);
     state.generatedAt = payload.generatedAt;
     render();
     refreshAutomationRuns().catch(() => {});

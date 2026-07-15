@@ -16,7 +16,7 @@ It does that by combining:
 - per-project `.project-status.json` files
 - git metadata
 - optional live site health checks
-- local browser state for pins and private hiding
+- browser state for pins, a server-side prefs file for private hiding
 - a static frontend served by a tiny Node server
 
 The important design choice is that the dashboard is not the source of truth. Each project owns its own status file. The dashboard only reads, merges, and presents that truth.
@@ -81,11 +81,13 @@ Dashboard index data belongs in the dashboard:
 data/dashboard.config.json
 ```
 
-Browser preferences belong in the browser:
+Viewing preferences stay out of the status files. Per-browser ones (pins, theme) live in:
 
 ```text
 localStorage
 ```
+
+Preferences that must hold everywhere the dashboard is reached from, like the private-hiding list, live in a small server-side prefs file (`data/dashboard.prefs.json`), because localStorage is per-origin: a localhost tab and a tunnel hostname would otherwise disagree about what is hidden.
 
 That separation matters. A pinned card or hidden card is a personal viewing preference, not a change to the project itself. A project being completed is real project truth, so it belongs in the status file.
 
@@ -172,7 +174,7 @@ Instead, share the pattern:
 - local-first UI
 - manual progress with milestone evidence
 - agent-written next actions
-- private browser-only preferences
+- viewing preferences kept out of project files
 
 That is the reusable idea. The private project inventory can stay private.
 

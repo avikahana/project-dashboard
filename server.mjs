@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { mergeProjectStatusFile, moveProjectStatus, syncProjects } from "./lib/project-sync.mjs";
 import { getLastRun, runAutomation, setAutomationStatus } from "./lib/automation-actions.mjs";
 import { dismissSuggestion, startSuggestion } from "./lib/next-projects.mjs";
+import { getHiddenProjects, setProjectHidden } from "./lib/prefs.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
@@ -354,6 +355,9 @@ async function handleApi(req, res, requestUrl) {
       generatedAt: new Date().toISOString(),
       schemaVersion: 1,
       syncedAt: cached.syncedAt,
+      // Server-persisted Private list, so hiding a project holds across every
+      // origin the dashboard is reached from (localhost, tunnel hostname).
+      hiddenProjects: await getHiddenProjects(),
       projects
     });
     return;
@@ -429,6 +433,21 @@ async function handleApi(req, res, requestUrl) {
       }
       throw error;
     }
+    return;
+  }
+
+  // Private-list toggles. The id only ever lands in data/dashboard.prefs.json
+  // as an opaque string (route regex constrains its charset); it never reaches
+  // the filesystem as a path.
+  const hideMatch = requestUrl.pathname.match(/^\/api\/projects\/([A-Za-z0-9._-]+)\/(hide|unhide)$/);
+  if (hideMatch) {
+    const [, hideProjectId, hideAction] = hideMatch;
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: `Use POST for ${hideAction}` });
+      return;
+    }
+    const hiddenProjects = await setProjectHidden(hideProjectId, hideAction === "hide");
+    sendJson(res, 200, { ok: true, id: hideProjectId, hidden: hideAction === "hide", hiddenProjects });
     return;
   }
 
