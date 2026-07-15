@@ -484,7 +484,7 @@ function formatLine(label, value) {
 
 function buildAgentContext(project) {
   const milestones = (project.milestones || [])
-    .map((milestone) => `- ${milestone.done ? "[done]" : "[open]"} ${milestone.name}`)
+    .map((milestone) => `- ${milestone.done ? "[done]" : "[open]"} ${milestone.name ?? milestone.title ?? ""}`)
     .join("\n") || "- Not set";
   const tags = (project.tags || []).join(", ") || "Not set";
   const git = project.git?.available
@@ -745,7 +745,7 @@ function renderProject(project) {
   visibleMilestones.forEach((milestone) => {
     const item = document.createElement("span");
     item.className = `milestone ${milestone.done ? "done" : ""}`.trim();
-    item.textContent = `${milestone.done ? "Done" : "Open"}: ${milestone.name}`;
+    item.textContent = `${milestone.done ? "Done" : "Open"}: ${milestone.name ?? milestone.title ?? ""}`;
     milestones.append(item);
   });
   const hiddenMilestoneCount = projectMilestones.length - visibleMilestones.length;
