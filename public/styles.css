@@ -1353,6 +1353,14 @@ button.link-pill:disabled {
   display: grid;
 }
 
+.check-group-desc {
+  margin: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .check-row {
   display: flex;
   align-items: flex-start;

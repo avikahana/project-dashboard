@@ -31,6 +31,9 @@ const state = {
   collapsedGroups: new Set(),
   nextStepsCollapsed: false,
   expandedNextSteps: new Set(),
+  checklist: null,
+  checklistCollapsed: false,
+  expandedChecklistItems: new Set(),
   expandedProjects: new Set(),
   expandedNextProjects: new Set(),
   expandedOnlineProjects: new Set(),
@@ -1651,8 +1654,127 @@ function renderNextStepRow(project) {
   return row;
 }
 
+function buildCheckGroup({ name, count, collapsed, onToggle, rows, description }) {
+  const group = document.createElement("section");
+  group.className = "check-group";
+
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "group-head check-group-head";
+  head.setAttribute("aria-expanded", String(!collapsed));
+
+  const chevron = document.createElement("span");
+  chevron.className = "group-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "▾";
+
+  const gname = document.createElement("span");
+  gname.className = "group-name";
+  gname.textContent = name;
+
+  const gcount = document.createElement("span");
+  gcount.className = "group-count";
+  gcount.textContent = count;
+
+  head.append(chevron, gname, gcount);
+  head.addEventListener("click", onToggle);
+
+  group.append(head);
+
+  if (!collapsed) {
+    const body = document.createElement("div");
+    body.className = "check-group-body";
+    if (description) {
+      const desc = document.createElement("p");
+      desc.className = "check-group-desc";
+      desc.textContent = description;
+      body.append(desc);
+    }
+    body.append(...rows);
+    group.append(body);
+  }
+
+  return group;
+}
+
+// Standalone checklist rows (Knowledge Expanders). Unlike next-step rows,
+// check state persists server-side into data/checklist.json, so it holds
+// across browsers.
+async function toggleChecklistItem(item, done) {
+  const previous = { done: item.done, doneAt: item.doneAt };
+  item.done = done;
+  item.doneAt = done ? new Date().toISOString() : null;
+  renderChecklistsView();
+  try {
+    const response = await fetch(`/api/checklist/${encodeURIComponent(item.id)}/${done ? "check" : "uncheck"}`, { method: "POST" });
+    if (!response.ok) throw new Error(`Checklist update failed: ${response.status}`);
+  } catch (error) {
+    item.done = previous.done;
+    item.doneAt = previous.doneAt;
+    renderChecklistsView();
+    showToast(error.message);
+  }
+}
+
+function renderChecklistItemRow(item) {
+  const expanded = state.expandedChecklistItems.has(item.id);
+
+  const row = document.createElement("div");
+  row.className = "check-row";
+  if (item.done) row.classList.add("is-done");
+  if (expanded) row.classList.add("is-open");
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "check-box";
+  checkbox.checked = Boolean(item.done);
+  checkbox.addEventListener("change", () => {
+    toggleChecklistItem(item, checkbox.checked);
+  });
+
+  const body = document.createElement("button");
+  body.type = "button";
+  body.className = "check-body check-toggle";
+  body.setAttribute("aria-expanded", String(expanded));
+
+  const title = document.createElement("span");
+  title.className = "check-title";
+
+  const chevron = document.createElement("span");
+  chevron.className = "row-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "›";
+
+  const titleText = document.createElement("span");
+  titleText.textContent = item.title || item.id;
+
+  title.append(chevron, titleText);
+  body.append(title);
+
+  if (expanded) {
+    const parts = [String(item.detail || "").trim()];
+    if (item.source) parts.push(`Came up in: ${item.source}`);
+    if (item.done && item.doneAt) parts.push(`Done ${compactDate(item.doneAt)}`);
+    const detail = document.createElement("span");
+    detail.className = "check-detail";
+    detail.textContent = parts.filter(Boolean).join(" · ");
+    body.append(detail);
+  }
+
+  body.addEventListener("click", () => {
+    if (state.expandedChecklistItems.has(item.id)) state.expandedChecklistItems.delete(item.id);
+    else state.expandedChecklistItems.add(item.id);
+    renderChecklistsView();
+  });
+
+  row.append(checkbox, body);
+  return row;
+}
+
 function renderChecklistsView() {
   if (state.view !== "checklists") return;
+
+  const sections = [];
 
   const items = state.projects
     .filter((project) => !state.hiddenProjects.has(projectId(project)))
@@ -1663,7 +1785,36 @@ function renderChecklistsView() {
     })
     .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
 
-  if (items.length === 0) {
+  if (items.length > 0) {
+    sections.push(buildCheckGroup({
+      name: "Projects Next Steps",
+      count: String(items.length),
+      collapsed: state.nextStepsCollapsed,
+      onToggle: () => {
+        state.nextStepsCollapsed = !state.nextStepsCollapsed;
+        renderChecklistsView();
+      },
+      rows: items.map(renderNextStepRow)
+    }));
+  }
+
+  const checklistItems = Array.isArray(state.checklist?.items) ? state.checklist.items : [];
+  if (checklistItems.length > 0) {
+    const doneCount = checklistItems.filter((item) => item.done).length;
+    sections.push(buildCheckGroup({
+      name: state.checklist.title || "Checklist",
+      count: `${doneCount}/${checklistItems.length}`,
+      collapsed: state.checklistCollapsed,
+      onToggle: () => {
+        state.checklistCollapsed = !state.checklistCollapsed;
+        renderChecklistsView();
+      },
+      rows: checklistItems.map(renderChecklistItemRow),
+      description: state.checklist.description || null
+    }));
+  }
+
+  if (sections.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty";
     empty.textContent = "No project next steps found.";
@@ -1671,43 +1822,7 @@ function renderChecklistsView() {
     return;
   }
 
-  const group = document.createElement("section");
-  group.className = "check-group";
-
-  const head = document.createElement("button");
-  head.type = "button";
-  head.className = "group-head check-group-head";
-  head.setAttribute("aria-expanded", String(!state.nextStepsCollapsed));
-
-  const chevron = document.createElement("span");
-  chevron.className = "group-chevron";
-  chevron.setAttribute("aria-hidden", "true");
-  chevron.textContent = "▾";
-
-  const gname = document.createElement("span");
-  gname.className = "group-name";
-  gname.textContent = "Projects Next Steps";
-
-  const gcount = document.createElement("span");
-  gcount.className = "group-count";
-  gcount.textContent = String(items.length);
-
-  head.append(chevron, gname, gcount);
-  head.addEventListener("click", () => {
-    state.nextStepsCollapsed = !state.nextStepsCollapsed;
-    renderChecklistsView();
-  });
-
-  group.append(head);
-
-  if (!state.nextStepsCollapsed) {
-    const body = document.createElement("div");
-    body.className = "check-group-body";
-    body.append(...items.map(renderNextStepRow));
-    group.append(body);
-  }
-
-  elements.checklistsView.replaceChildren(group);
+  elements.checklistsView.replaceChildren(...sections);
 }
 
 function render() {
@@ -1810,6 +1925,13 @@ async function loadNextProjects() {
   renderNextProjects();
 }
 
+async function loadChecklist() {
+  const response = await fetch("/api/checklist");
+  if (!response.ok) throw new Error(`Checklist load failed: ${response.status}`);
+  state.checklist = await response.json();
+  renderChecklistsView();
+}
+
 async function loadProjects({ includeHealth = false, quiet = false, force = false } = {}) {
   if (state.loadingProjects && !force) return state.loadingProjects;
 
@@ -1880,7 +2002,8 @@ async function syncAndLoadProjects() {
     if (!response.ok) throw new Error(`Sync failed: ${response.status}`);
     await Promise.all([
       loadProjects({ force: true }),
-      loadNextProjects()
+      loadNextProjects(),
+      loadChecklist()
     ]);
   } finally {
     elements.refreshProjects.disabled = false;
@@ -1978,6 +2101,10 @@ applyTheme();
 updateBackToTop();
 
 loadNextProjects().catch((error) => {
+  showToast(error.message);
+});
+
+loadChecklist().catch((error) => {
   showToast(error.message);
 });
 

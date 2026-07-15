@@ -9,6 +9,7 @@ import { mergeProjectStatusFile, moveProjectStatus, syncProjects } from "./lib/p
 import { getLastRun, runAutomation, setAutomationStatus } from "./lib/automation-actions.mjs";
 import { dismissSuggestion, startSuggestion } from "./lib/next-projects.mjs";
 import { getHiddenProjects, setProjectHidden } from "./lib/prefs.mjs";
+import { getChecklist, setChecklistItemDone } from "./lib/checklist.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
@@ -387,6 +388,32 @@ async function handleApi(req, res, requestUrl) {
       if (error.code !== "ENOENT") throw error;
     }
     sendJson(res, 200, payload);
+    return;
+  }
+
+  if (requestUrl.pathname === "/api/checklist") {
+    // Missing file on a fresh clone (data/ is gitignored) is an empty list,
+    // not a 500.
+    sendJson(res, 200, await getChecklist());
+    return;
+  }
+
+  // Standalone checklist toggles. The id is only matched against entries in
+  // data/checklist.json (route regex constrains its charset); it never reaches
+  // the filesystem as a path. Check state persists into the file itself.
+  const checklistMatch = requestUrl.pathname.match(/^\/api\/checklist\/([A-Za-z0-9._-]+)\/(check|uncheck)$/);
+  if (checklistMatch) {
+    const [, checklistItemId, checklistAction] = checklistMatch;
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: `Use POST for ${checklistAction}` });
+      return;
+    }
+    const item = await setChecklistItemDone(checklistItemId, checklistAction === "check");
+    if (!item) {
+      sendJson(res, 404, { error: `Unknown checklist item: ${checklistItemId}` });
+      return;
+    }
+    sendJson(res, 200, { ok: true, item });
     return;
   }
 
