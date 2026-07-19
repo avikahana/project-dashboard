@@ -667,13 +667,35 @@ html[data-theme="light"] .theme-toggle-thumb {
 }
 
 .notes {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
   margin-bottom: 14px;
   color: var(--muted);
   line-height: 1.45;
+}
+
+/* Long next actions and notes collapse behind a Show more toggle. */
+.next-action.is-clamped,
+.notes.is-clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.notes.is-clamped {
+  -webkit-line-clamp: 4;
+}
+
+.text-toggle {
+  display: block;
+  border: 0;
+  background: none;
+  padding: 0;
+  margin: -4px 0 12px;
+  color: var(--cobalt);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 800;
+  cursor: pointer;
 }
 
 .milestones {
@@ -698,9 +720,27 @@ html[data-theme="light"] .theme-toggle-thumb {
   border-color: color-mix(in srgb, var(--green) 38%, var(--line));
 }
 
-.milestone-summary {
+.milestones-done {
+  margin-top: 10px;
+}
+
+.milestones-done .milestones {
+  margin-top: 8px;
+}
+
+.done-toggle {
+  border: 0;
+  background: none;
+  padding: 0;
   color: var(--muted);
-  background: transparent;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.done-toggle:hover {
+  color: var(--ink);
 }
 
 .card-side {
@@ -1391,6 +1431,12 @@ button.link-pill:disabled {
   display: grid;
   gap: 3px;
   min-width: 0;
+  flex: 1;
+}
+
+.check-jump {
+  flex: none;
+  align-self: flex-start;
 }
 
 .check-title {
@@ -1400,6 +1446,14 @@ button.link-pill:disabled {
 .check-detail {
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+/* Next actions can be long; keep rows scannable and let a click reveal the rest. */
+.check-row:not(.is-open) .check-detail {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .check-row.is-done .check-title {
@@ -1433,4 +1487,101 @@ button.link-pill:disabled {
 
 .check-row.is-open .row-chevron {
   transform: rotate(90deg);
+}
+
+/* Waiting PRs: the rail tab carries a red count pill visible from every view.
+   --paper flips with the theme, so the digits stay readable on both reds. */
+.tab-count {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--red);
+  color: var(--paper);
+  font-size: 0.72rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The inline-flex display above overrides the [hidden] attribute, same as the
+   toggled panels; restore it so a zero count truly disappears. */
+.tab-count[hidden] {
+  display: none;
+}
+
+.prs-view {
+  display: grid;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.prs-view[hidden] {
+  display: none;
+}
+
+/* One card per open PR, left border toned by check status like the project
+   cards; drafts stay on the muted default. */
+.pr-card {
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 6px solid var(--muted);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.pr-card[data-check="failing"] { border-left-color: var(--red); }
+.pr-card[data-check="pending"] { border-left-color: var(--amber); }
+.pr-card[data-check="passing"] { border-left-color: var(--green); }
+
+.pr-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.pr-repo {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.pr-head h3 {
+  overflow-wrap: anywhere;
+}
+
+.badge.muted {
+  color: var(--muted);
+}
+
+.pr-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.pr-links {
+  margin-top: 2px;
+}
+
+.pr-error {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 720px) {
+  .pr-head {
+    flex-direction: column;
+  }
+
+  .pr-head .badge-row {
+    justify-content: flex-start;
+  }
 }

@@ -2,8 +2,8 @@ const HIDDEN_PROJECTS_KEY = "dashboard-hidden-projects";
 const PINNED_PROJECTS_KEY = "dashboard-pinned-projects";
 const CHECKED_NEXT_STEPS_KEY = "dashboard-checked-next-steps";
 const AUTO_REFRESH_MS = 30000;
+const PRS_REFRESH_MS = 60000;
 const FOCUS_REFRESH_STALE_MS = 5000;
-const MAX_VISIBLE_MILESTONES = 12;
 const NEXT_PROJECT_PREVIEW_LIMIT = 6;
 
 function readStoredSet(key) {
@@ -30,11 +30,13 @@ const state = {
   theme: localStorage.getItem("dashboard-theme") || "dark",
   collapsedGroups: new Set(),
   nextStepsCollapsed: false,
-  expandedNextSteps: new Set(),
   checklist: null,
   checklistCollapsed: false,
+  waitingPrs: null,
   expandedChecklistItems: new Set(),
   expandedProjects: new Set(),
+  expandedNextSteps: new Set(),
+  expandedCardText: new Set(),
   expandedNextProjects: new Set(),
   expandedOnlineProjects: new Set(),
   hiddenProjects: readStoredSet(HIDDEN_PROJECTS_KEY),
@@ -65,6 +67,8 @@ const elements = {
   scheduledBand: document.querySelector("#scheduled-band"),
   projectsHead: document.querySelector("#projects-head"),
   checklistsView: document.querySelector("#checklists-view"),
+  prsView: document.querySelector("#prs-view"),
+  prsCount: document.querySelector("#prs-count"),
   viewTabs: [...document.querySelectorAll(".view-tab")],
   sourceTabs: [...document.querySelectorAll(".source-tab")],
   scheduledSourceTabs: [...document.querySelectorAll(".scheduled-source-tab")],
@@ -256,6 +260,22 @@ function compactDate(value) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(date);
+}
+
+// PR cards show freshness as an age ("3h ago"): what matters there is how
+// long a PR has been waiting, not the wall-clock moment it last moved.
+// Anything older than a week falls back to the absolute compactDate.
+function relativeTime(value) {
+  const time = new Date(value).getTime();
+  if (!value || Number.isNaN(time)) return "Unknown";
+  const minutes = Math.round((Date.now() - time) / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return compactDate(value);
 }
 
 function statusClass(value = "") {
@@ -746,8 +766,31 @@ function describeAutomationRun(run) {
   return `${outcome} ${compactDate(run.finishedAt || run.startedAt)}`;
 }
 
+// Long free-text card fields (next action, notes) are clamped by CSS with a
+// Show more toggle. The threshold is character-based so the toggle is
+// deterministic without measuring the rendered DOM.
+const LONG_CARD_TEXT = 240;
+
+function setExpandableCardText(node, text, key) {
+  node.textContent = text;
+  if (text.length <= LONG_CARD_TEXT) return;
+  const expanded = state.expandedCardText.has(key);
+  node.classList.toggle("is-clamped", !expanded);
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "text-toggle";
+  toggle.textContent = expanded ? "Show less" : "Show more";
+  toggle.addEventListener("click", () => {
+    if (expanded) state.expandedCardText.delete(key);
+    else state.expandedCardText.add(key);
+    render();
+  });
+  node.after(toggle);
+}
+
 function renderProject(project) {
   const node = elements.template.content.firstElementChild.cloneNode(true);
+  const id = projectId(project);
   const progress = Number.isFinite(project.progress) ? project.progress : null;
   const healthStatus = project.health?.status || (project.liveUrl || project.healthCheckUrl ? "Unknown" : null);
   const repoUrl = project.repoUrl || project.git?.remoteUrl;
@@ -777,30 +820,51 @@ function renderProject(project) {
   progressValue.classList.toggle("is-unknown", progress === null);
   node.querySelector(".phase").textContent = project.automation?.schedule || project.phase || "Unknown phase";
   node.querySelector(".progress-track span").style.setProperty("--progress-width", progress === null ? "0%" : `${Math.max(0, Math.min(100, progress))}%`);
-  node.querySelector(".next-action").textContent = project.nextAction ? `Next: ${project.nextAction}` : "Next: Not set";
-  node.querySelector(".notes").textContent = project.notes || "";
+  setExpandableCardText(node.querySelector(".next-action"), project.nextAction ? `Next: ${project.nextAction}` : "Next: Not set", `${id}::next`);
+  setExpandableCardText(node.querySelector(".notes"), project.notes || "", `${id}::notes`);
 
+  // Open milestones live in the main pile; completed ones move to their own
+  // collapsed section below so they stop drowning out what is still to do.
   const milestones = node.querySelector(".milestones");
   const projectMilestones = project.milestones || [];
   const openMilestones = projectMilestones.filter((milestone) => !milestone.done);
   const doneMilestones = projectMilestones.filter((milestone) => milestone.done);
-  const doneLimit = Math.max(0, MAX_VISIBLE_MILESTONES - openMilestones.length);
-  // slice(-0) would return every done milestone, so guard the zero case.
-  const visibleMilestones = doneLimit > 0
-    ? [...openMilestones, ...doneMilestones.slice(-doneLimit)]
-    : openMilestones;
-  visibleMilestones.forEach((milestone) => {
+  openMilestones.forEach((milestone) => {
     const item = document.createElement("span");
-    item.className = `milestone ${milestone.done ? "done" : ""}`.trim();
-    item.textContent = `${milestone.done ? "Done" : "Open"}: ${milestone.name ?? milestone.title ?? ""}`;
+    item.className = "milestone";
+    item.textContent = `Open: ${milestone.name ?? milestone.title ?? ""}`;
     milestones.append(item);
   });
-  const hiddenMilestoneCount = projectMilestones.length - visibleMilestones.length;
-  if (hiddenMilestoneCount > 0) {
-    const summary = document.createElement("span");
-    summary.className = "milestone milestone-summary";
-    summary.textContent = `${hiddenMilestoneCount} more completed`;
-    milestones.append(summary);
+  if (doneMilestones.length > 0) {
+    const doneExpanded = state.expandedCardText.has(`${id}::milestones`);
+    const doneWrap = document.createElement("div");
+    doneWrap.className = "milestones-done";
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "done-toggle";
+    toggle.setAttribute("aria-expanded", String(doneExpanded));
+    toggle.textContent = `${doneExpanded ? "▾" : "›"} Completed (${doneMilestones.length})`;
+    toggle.addEventListener("click", () => {
+      if (doneExpanded) state.expandedCardText.delete(`${id}::milestones`);
+      else state.expandedCardText.add(`${id}::milestones`);
+      render();
+    });
+    doneWrap.append(toggle);
+
+    if (doneExpanded) {
+      const doneList = document.createElement("div");
+      doneList.className = "milestones";
+      doneMilestones.forEach((milestone) => {
+        const item = document.createElement("span");
+        item.className = "milestone done";
+        item.textContent = milestone.name ?? milestone.title ?? "";
+        doneList.append(item);
+      });
+      doneWrap.append(doneList);
+    }
+
+    milestones.after(doneWrap);
   }
 
   const evidence = node.querySelector(".evidence");
@@ -1618,6 +1682,8 @@ function renderNextStepRow(project) {
     renderChecklistsView();
   });
 
+  // Long next actions are clamped by CSS; clicking the text toggles the
+  // full version inline. The card itself stays behind the jump button.
   const body = document.createElement("button");
   body.type = "button";
   body.className = "check-body check-toggle";
@@ -1625,32 +1691,26 @@ function renderNextStepRow(project) {
 
   const title = document.createElement("span");
   title.className = "check-title";
+  title.textContent = project.name || "Untitled project";
 
-  const chevron = document.createElement("span");
-  chevron.className = "row-chevron";
-  chevron.setAttribute("aria-hidden", "true");
-  chevron.textContent = "›";
+  const detail = document.createElement("span");
+  detail.className = "check-detail";
+  detail.textContent = String(project.nextAction).trim();
 
-  const titleText = document.createElement("span");
-  titleText.textContent = project.name || "Untitled project";
-
-  title.append(chevron, titleText);
-  body.append(title);
-
-  if (expanded) {
-    const detail = document.createElement("span");
-    detail.className = "check-detail";
-    detail.textContent = String(project.nextAction).trim();
-    body.append(detail);
-  }
-
+  body.append(title, detail);
   body.addEventListener("click", () => {
     if (state.expandedNextSteps.has(id)) state.expandedNextSteps.delete(id);
     else state.expandedNextSteps.add(id);
     renderChecklistsView();
   });
 
-  row.append(checkbox, body);
+  const jump = document.createElement("button");
+  jump.type = "button";
+  jump.className = "link-pill check-jump";
+  jump.textContent = "Project card";
+  jump.addEventListener("click", () => focusProjectCard(project));
+
+  row.append(checkbox, body, jump);
   return row;
 }
 
@@ -1825,6 +1885,115 @@ function renderChecklistsView() {
   elements.checklistsView.replaceChildren(...sections);
 }
 
+// The count pill on the Waiting PRs rail tab is part of the page base: it
+// reflects open PRs from every view, updated straight from the PR poll.
+function updatePrsBadge() {
+  const count = state.waitingPrs?.prs?.length || 0;
+  elements.prsCount.hidden = count === 0;
+  elements.prsCount.textContent = String(count);
+}
+
+// Draft wins over check state: a draft's checks are informational until the
+// PR is marked ready, so the card stays muted either way.
+function prCheckBadge(pr) {
+  if (pr.isDraft) return createBadge("Draft", "muted", "Draft PR; not ready for review yet");
+  if (pr.checkStatus === "failing") return createBadge("Failed", "blocked", "At least one status check failed");
+  if (pr.checkStatus === "pending") return createBadge("Pending", "review", "Status checks are still running");
+  if (pr.checkStatus === "passing") return createBadge("Success", "completed", "All status checks passed");
+  return createBadge("No checks", "muted", "No status checks ran on this PR");
+}
+
+function renderPrCard(pr) {
+  const card = document.createElement("article");
+  card.className = "pr-card";
+  card.dataset.check = pr.isDraft ? "draft" : pr.checkStatus;
+
+  const head = document.createElement("div");
+  head.className = "pr-head";
+
+  const heading = document.createElement("div");
+  const repoRef = document.createElement("p");
+  repoRef.className = "pr-repo";
+  repoRef.textContent = `${pr.repo}#${pr.number}`;
+  const title = document.createElement("h3");
+  title.textContent = pr.title || "Untitled PR";
+  heading.append(repoRef, title);
+
+  const badges = document.createElement("div");
+  badges.className = "badge-row";
+  badges.append(prCheckBadge(pr));
+  if (pr.reviewDecision) {
+    badges.append(createBadge(
+      labelize(String(pr.reviewDecision).toLowerCase().replace(/_/g, "-")),
+      pr.reviewDecision === "APPROVED" ? "completed" : pr.reviewDecision === "CHANGES_REQUESTED" ? "review" : "",
+      "Current review decision on this PR"
+    ));
+  }
+  if (pr.mergeable === "CONFLICTING") badges.append(createBadge("Conflicts", "blocked", "This branch conflicts with its base branch"));
+
+  head.append(heading, badges);
+
+  const meta = document.createElement("p");
+  meta.className = "pr-meta";
+  meta.textContent = [
+    pr.headRefName,
+    pr.author ? `by ${pr.author}` : null,
+    `updated ${relativeTime(pr.updatedAt)}`
+  ].filter(Boolean).join(" · ");
+
+  const links = document.createElement("div");
+  links.className = "links pr-links";
+  const open = document.createElement("a");
+  open.className = "link-pill";
+  open.href = pr.url;
+  open.target = "_blank";
+  open.rel = "noopener";
+  open.textContent = "Go to PR";
+  links.append(open);
+
+  card.append(head, meta, links);
+  return card;
+}
+
+function renderPrsView() {
+  elements.prsView.hidden = state.view !== "prs";
+  // Rebuilt on every render pass; skip the DOM work while hidden behind
+  // another tab (the rail pill updates straight from the poll instead).
+  if (state.view !== "prs") return;
+
+  if (!state.waitingPrs) {
+    const loading = document.createElement("p");
+    loading.className = "empty";
+    loading.textContent = "Checking GitHub for open PRs...";
+    elements.prsView.replaceChildren(loading);
+    return;
+  }
+
+  const prs = Array.isArray(state.waitingPrs.prs) ? state.waitingPrs.prs : [];
+  const errors = Array.isArray(state.waitingPrs.errors) ? state.waitingPrs.errors : [];
+  const children = [];
+
+  if (prs.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No PRs waiting.";
+    children.push(empty);
+  } else {
+    children.push(...prs.map(renderPrCard));
+  }
+
+  errors.forEach((entry) => {
+    const note = document.createElement("p");
+    note.className = "pr-error";
+    note.textContent = entry.repo
+      ? `Couldn't check ${entry.repo}: ${entry.message}`
+      : "GitHub CLI (gh) is not installed, so open PRs can't be checked.";
+    children.push(note);
+  });
+
+  elements.prsView.replaceChildren(...children);
+}
+
 function render() {
   const sourceLabel = sourceLabels[state.sourceFilter] || sourceLabels.all;
   const [statusLabel, title] = statusLabels[state.statusFilter] || statusLabels.ongoing;
@@ -1859,6 +2028,7 @@ function render() {
   elements.scheduledBand.hidden = state.view !== "scheduled";
   elements.checklistsView.hidden = state.view !== "checklists";
   renderChecklistsView();
+  renderPrsView();
 
   renderMetrics(visible);
   renderCompletedPanel();
@@ -1881,7 +2051,7 @@ function render() {
     return;
   }
 
-  if (state.view === "next" || state.view === "checklists") {
+  if (state.view === "next" || state.view === "checklists" || state.view === "prs") {
     elements.list.replaceChildren();
     return;
   }
@@ -1923,6 +2093,14 @@ async function loadNextProjects() {
   state.nextProjects = (Array.isArray(payload.suggestions) ? payload.suggestions : [])
     .filter((item) => !["dismissed", "started"].includes(String(item.status || "").toLowerCase()));
   renderNextProjects();
+}
+
+async function loadWaitingPrs() {
+  const response = await fetch("/api/waiting-prs");
+  if (!response.ok) throw new Error(`Waiting PR load failed: ${response.status}`);
+  state.waitingPrs = await response.json();
+  updatePrsBadge();
+  renderPrsView();
 }
 
 async function loadChecklist() {
@@ -2107,6 +2285,17 @@ loadNextProjects().catch((error) => {
 loadChecklist().catch((error) => {
   showToast(error.message);
 });
+
+loadWaitingPrs().catch((error) => {
+  showToast(error.message);
+});
+
+// The rail pill must stay honest from every view, so the PR poll runs on its
+// own clock regardless of the active tab; a failed poll keeps the last state
+// silently instead of toasting every minute.
+window.setInterval(() => {
+  loadWaitingPrs().catch(() => {});
+}, PRS_REFRESH_MS);
 
 loadProjects().then(() => {
   // Fill the Online section with real statuses without delaying first paint.

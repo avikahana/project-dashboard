@@ -63,6 +63,7 @@
             <button class="tab view-tab" type="button" data-view="next">What's next</button>
             <button class="tab view-tab" type="button" data-view="online">Online</button>
             <button class="tab view-tab" type="button" data-view="checklists">Checklists</button>
+            <button class="tab view-tab" type="button" data-view="prs">Waiting PRs <span class="tab-count" id="prs-count" hidden>0</span></button>
           </nav>
         </aside>
 
@@ -133,6 +134,8 @@
           </section>
 
           <section id="checklists-view" class="checklists-view" aria-label="Checklists" hidden></section>
+
+          <section id="prs-view" class="prs-view" aria-label="Waiting pull requests" hidden></section>
         </div>
       </section>
     </main>

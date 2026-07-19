@@ -10,6 +10,7 @@ import { getLastRun, runAutomation, setAutomationStatus } from "./lib/automation
 import { dismissSuggestion, startSuggestion } from "./lib/next-projects.mjs";
 import { getHiddenProjects, setProjectHidden } from "./lib/prefs.mjs";
 import { getChecklist, setChecklistItemDone } from "./lib/checklist.mjs";
+import { getWaitingPrs } from "./lib/waiting-prs.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
@@ -375,6 +376,15 @@ async function handleApi(req, res, requestUrl) {
       }))
     );
     sendJson(res, 200, { generatedAt: new Date().toISOString(), health });
+    return;
+  }
+
+  if (requestUrl.pathname === "/api/waiting-prs") {
+    // The repo list rides the enriched-projects cache; the PR scan itself is
+    // cached inside lib/waiting-prs.mjs, so the frontend's minute poll never
+    // hammers gh or the GitHub API.
+    const cached = await getEnrichedProjects();
+    sendJson(res, 200, await getWaitingPrs(cached.projects));
     return;
   }
 
