@@ -1,6 +1,4 @@
 import { createServer } from "node:http";
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
 import { execFile } from "node:child_process";
 import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -26,6 +24,12 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const BIND_IS_LOOPBACK = LOOPBACK_HOSTS.has(HOST);
 const ALLOW_REMOTE_BIND = process.env.DASHBOARD_ALLOW_REMOTE === "1";
+// The in-UI restart button simply exits the process; that is only safe when a
+// supervisor relaunches us (launchd KeepAlive, systemd, pm2, ...). Gate it on
+// an explicit opt-in so a bare `node server.mjs` run can't be killed from the
+// browser with nothing to bring it back. The frontend hides the button unless
+// this capability is advertised.
+const RESTART_ENABLED = process.env.DASHBOARD_RESTART_ENABLED === "1";
 
 // Host header values this server answers to. This is the DNS-rebinding guard:
 // a hostile page that repoints its own hostname at 127.0.0.1 still sends its
@@ -184,94 +188,95 @@ function normalizeHealthStatus(statusCode) {
   return "Down";
 }
 
-function checkHealth(targetUrl) {
-  return new Promise((resolve) => {
-    let settled = false;
-    let deadline = null;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      if (deadline) clearTimeout(deadline);
-      resolve(result);
+// A 3xx that lands on an SSO login page (Cloudflare Access) is an auth wall,
+// not a misconfigured redirect — report it like a 401/403 so protected sites
+// don't read as broken.
+function isAuthWallRedirect(location) {
+  if (!location) return false;
+  try {
+    return new URL(location).hostname.endsWith(".cloudflareaccess.com");
+  } catch {
+    return false;
+  }
+}
+
+// Probe a single URL with fetch (undici). We deliberately avoid the legacy
+// node:http/node:https client here: some servers — Home Assistant's aiohttp
+// among them — reset the connection ("socket hang up") for that client while
+// answering fetch/curl normally. redirect:"manual" keeps 3xx visible so
+// normalizeHealthStatus can distinguish "Redirecting" from a real "Live".
+async function probeUrl(targetUrl) {
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    return {
+      status: "Unknown",
+      checkedAt: new Date().toISOString(),
+      responseTimeMs: null,
+      statusCode: null,
+      error: "Invalid URL",
+      url: targetUrl
     };
+  }
 
-    if (!targetUrl) {
-      finish({
-        status: "Unknown",
-        checkedAt: new Date().toISOString(),
-        responseTimeMs: null,
-        statusCode: null,
-        error: "No liveUrl or healthCheckUrl configured"
-      });
-      return;
-    }
-
-    let parsed;
-    try {
-      parsed = new URL(targetUrl);
-    } catch {
-      finish({
-        status: "Unknown",
-        checkedAt: new Date().toISOString(),
-        responseTimeMs: null,
-        statusCode: null,
-        error: "Invalid URL"
-      });
-      return;
-    }
-
-    const startedAt = Date.now();
-    const transport = parsed.protocol === "https:" ? httpsRequest : httpRequest;
-    const req = transport(
-      parsed,
-      {
-        method: "GET",
-        timeout: 5000,
-        // mDNS hosts resolve to a link-local IPv6 address first, which Node
-        // intermittently fails to connect to; LAN devices serve over IPv4.
-        family: parsed.hostname.endsWith(".local") ? 4 : undefined,
-        headers: {
-          "user-agent": "AviProjectDashboard/0.1"
-        }
-      },
-      (response) => {
-        response.resume();
-        response.on("end", () => {
-          finish({
-            status: normalizeHealthStatus(response.statusCode),
-            checkedAt: new Date().toISOString(),
-            responseTimeMs: Date.now() - startedAt,
-            statusCode: response.statusCode,
-            location: response.headers.location || null,
-            url: targetUrl
-          });
-        });
-      }
-    );
-
-    // The socket timeout only fires on inactivity; a slow-drip response would
-    // keep the request alive forever, so enforce a hard overall deadline too.
-    deadline = setTimeout(() => {
-      req.destroy(new Error("Health check exceeded 7s deadline"));
-    }, 7000);
-
-    req.on("timeout", () => {
-      req.destroy(new Error("Request timed out"));
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(parsed, {
+      method: "GET",
+      redirect: "manual",
+      signal: AbortSignal.timeout(7000),
+      headers: { "user-agent": "AviProjectDashboard/0.1" }
     });
+    // Drain the body so the socket can be released back to the pool.
+    await response.arrayBuffer().catch(() => {});
+    const location = response.headers.get("location") || null;
+    const baseStatus = normalizeHealthStatus(response.status);
+    return {
+      status: baseStatus === "Redirecting" && isAuthWallRedirect(location) ? "Auth required" : baseStatus,
+      checkedAt: new Date().toISOString(),
+      responseTimeMs: Date.now() - startedAt,
+      statusCode: response.status,
+      location,
+      url: targetUrl
+    };
+  } catch (error) {
+    return {
+      status: "Down",
+      checkedAt: new Date().toISOString(),
+      responseTimeMs: Date.now() - startedAt,
+      statusCode: null,
+      error: error?.name === "TimeoutError" ? "Health check exceeded 7s deadline" : error.message,
+      url: targetUrl
+    };
+  }
+}
 
-    req.on("error", (error) => {
-      finish({
-        status: "Down",
-        checkedAt: new Date().toISOString(),
-        responseTimeMs: Date.now() - startedAt,
-        statusCode: null,
-        error: error.message,
-        url: targetUrl
-      });
-    });
+// Check a project's health, preferring healthCheckUrl (typically the direct
+// LAN box) but falling back to liveUrl (the public URL) when the primary can't
+// be reached. This keeps a device from reading as fully "down" just because,
+// say, its LAN IP rotated — it degrades to whatever the public URL reports.
+async function checkHealth(primaryUrl, fallbackUrl = null) {
+  if (!primaryUrl && !fallbackUrl) {
+    return {
+      status: "Unknown",
+      checkedAt: new Date().toISOString(),
+      responseTimeMs: null,
+      statusCode: null,
+      error: "No liveUrl or healthCheckUrl configured"
+    };
+  }
 
-    req.end();
-  });
+  const primary = primaryUrl ? await probeUrl(primaryUrl) : null;
+  const primaryOk = primary && primary.status !== "Down" && !primary.error;
+  if (primaryOk || !fallbackUrl || fallbackUrl === primaryUrl) {
+    return primary ?? probeUrl(fallbackUrl);
+  }
+
+  const fallback = await probeUrl(fallbackUrl);
+  // Only prefer the fallback if it actually reached the site; otherwise keep
+  // the primary result so the reported error points at the intended target.
+  return fallback.status !== "Down" && !fallback.error ? fallback : primary;
 }
 
 async function enrichProject(project) {
@@ -338,6 +343,24 @@ async function handleApi(req, res, requestUrl) {
     return;
   }
 
+  if (requestUrl.pathname === "/api/restart") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "Use POST to restart" });
+      return;
+    }
+    if (!RESTART_ENABLED) {
+      sendJson(res, 409, {
+        error: "Restart is not enabled on this server (set DASHBOARD_RESTART_ENABLED=1 and run under a supervisor that relaunches on exit)"
+      });
+      return;
+    }
+    sendJson(res, 200, { ok: true, restarting: true, at: new Date().toISOString() });
+    // Let the response flush, then exit so the KeepAlive supervisor relaunches
+    // a fresh process that picks up new server code, config, and status files.
+    setTimeout(() => process.exit(0), 300);
+    return;
+  }
+
   if (requestUrl.pathname === "/api/projects") {
     // Read-only: config writes happen only via POST /api/sync or the CLI,
     // so the frontend's periodic polling never rewrites dashboard.config.json.
@@ -350,13 +373,16 @@ async function handleApi(req, res, requestUrl) {
     if (includeHealth) {
       projects = await Promise.all(projects.map(async (project) => {
         const target = project.healthCheckUrl || project.liveUrl;
-        return target ? { ...project, health: await checkHealth(target) } : project;
+        return target ? { ...project, health: await checkHealth(project.healthCheckUrl, project.liveUrl) } : project;
       }));
     }
     sendJson(res, 200, {
       generatedAt: new Date().toISOString(),
       schemaVersion: 1,
       syncedAt: cached.syncedAt,
+      // Feature flags the frontend uses to show/hide server-dependent controls
+      // (e.g. the Restart button, which needs a supervisor to relaunch us).
+      capabilities: { restart: RESTART_ENABLED },
       // Server-persisted Private list, so hiding a project holds across every
       // origin the dashboard is reached from (localhost, tunnel hostname).
       hiddenProjects: await getHiddenProjects(),
@@ -372,7 +398,7 @@ async function handleApi(req, res, requestUrl) {
       onlineProjects.map(async (project) => ({
         id: project.id,
         name: project.name,
-        ...(await checkHealth(project.healthCheckUrl || project.liveUrl))
+        ...(await checkHealth(project.healthCheckUrl, project.liveUrl))
       }))
     );
     sendJson(res, 200, { generatedAt: new Date().toISOString(), health });

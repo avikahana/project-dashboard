@@ -76,6 +76,7 @@ const elements = {
   sortTabs: [...document.querySelectorAll(".sort-tab")],
   refreshProjects: document.querySelector("#refresh-projects"),
   refreshHealth: document.querySelector("#refresh-health"),
+  restartServer: document.querySelector("#restart-server"),
   themeToggle: document.querySelector("#theme-toggle"),
   themeToggleLabel: document.querySelector("#theme-toggle-label"),
   toggleCompleted: document.querySelector("#toggle-completed"),
@@ -2133,6 +2134,7 @@ async function loadProjects({ includeHealth = false, quiet = false, force = fals
       project.health ? project : { ...project, health: state.healthById.get(projectId(project)) || null }
     ));
     applyServerHiddenList(payload.hiddenProjects);
+    applyCapabilities(payload.capabilities);
     state.generatedAt = payload.generatedAt;
     render();
     refreshAutomationRuns().catch(() => {});
@@ -2169,6 +2171,65 @@ async function refreshHealth() {
     elements.refreshHealth.disabled = false;
     elements.refreshHealth.textContent = "Check live sites";
   }
+}
+
+// Show server-dependent controls only when the server says it supports them.
+// The restart button is useless (and misleading) unless a supervisor will
+// relaunch the process, so it stays hidden until the capability is advertised.
+function applyCapabilities(capabilities) {
+  const canRestart = Boolean(capabilities && capabilities.restart);
+  elements.restartServer.hidden = !canRestart;
+}
+
+async function restartServer() {
+  if (!window.confirm("Restart the dashboard server? It goes down for a few seconds, then reloads here automatically.")) return;
+  elements.restartServer.disabled = true;
+  elements.restartServer.textContent = "Restarting...";
+  elements.lastUpdated.textContent = "Restarting server...";
+  try {
+    const response = await fetch("/api/restart", { method: "POST" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Restart failed: ${response.status}`);
+    }
+  } catch (error) {
+    // A dropped connection as the process exits is expected; the poll below is
+    // the real signal for whether the fresh process came back.
+    if (error instanceof TypeError) {
+      // network error mid-exit — fall through to polling
+    } else {
+      elements.restartServer.disabled = false;
+      elements.restartServer.textContent = "Restart server";
+      elements.lastUpdated.textContent = error.message;
+      return;
+    }
+  }
+
+  // Poll until the relaunched process answers, then reload everything.
+  const deadline = Date.now() + 30000;
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  let back = false;
+  while (Date.now() < deadline) {
+    try {
+      const ping = await fetch("/api/projects?git=0&health=0", { cache: "no-store" });
+      if (ping.ok) { back = true; break; }
+    } catch {
+      // still down; keep polling
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  elements.restartServer.disabled = false;
+  elements.restartServer.textContent = "Restart server";
+  if (!back) {
+    elements.lastUpdated.textContent = "Server did not come back within 30s — check the LaunchAgent.";
+    return;
+  }
+  await Promise.all([
+    loadProjects({ force: true }),
+    loadNextProjects().catch(() => {}),
+    loadChecklist().catch(() => {})
+  ]);
 }
 
 async function syncAndLoadProjects() {
@@ -2239,6 +2300,7 @@ document.addEventListener("click", () => {
 
 elements.refreshProjects.addEventListener("click", syncAndLoadProjects);
 elements.refreshHealth.addEventListener("click", refreshHealth);
+elements.restartServer.addEventListener("click", restartServer);
 elements.themeToggle.addEventListener("click", () => {
   state.theme = state.theme === "dark" ? "light" : "dark";
   localStorage.setItem("dashboard-theme", state.theme);
