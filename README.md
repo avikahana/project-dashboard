@@ -28,9 +28,10 @@ The app has no third-party package dependencies. It uses Node's built-in HTTP se
 
 ## Layout
 
-The page base, visible on every tab, is the metric strip (Ongoing, Planning, Scheduled, Completed, Online, Needs review) with the Online strip directly under it. Below that, a left rail switches between six views:
+The page base, visible on every tab, is the metric strip (Ongoing, Planning, Scheduled, Completed, Online, Needs review) with the Online strip directly under it. Below that, a left rail switches between seven views:
 
 - **Tracked projects**: the grouped project list (pinned, active, planning, paused, blocked, completed, private), with source and status filters, search, and sorting. Each row expands into the full project card. The row menu's **Move to** submenu moves a card to another status group by rewriting the `status` field in that project's own `.project-status.json` on disk (moving to Completed stamps `completedAt`, moving out clears it); its **Private** target changes no status files; the hidden list is saved server-side in `data/dashboard.prefs.json` (gitignored) so it holds across browsers and hostnames, while Pin stays browser-local. Group targets appear only on cards that have a status file.
+- **Sessions**: Claude Code and Codex sessions running on this machine right now, one card each (see Running Sessions below). The rail tab carries a green count pill visible from every view, refreshed every 15 seconds.
 - **Scheduled**: Codex automations and Claude Code scheduled tasks, with a Claude/Codex/All filter and per-task controls (see Scheduled Tasks below).
 - **What's next**: idea rows from `data/next-projects.json`. These are suggestions, not tracked projects, and do not affect any counts. Each row has two actions: **Dismiss** hides the suggestion (its `status` flips to `dismissed` in the file; restore by editing the file), and **Start** promotes it, creating a new project home folder containing a planning `.project-status.json` and syncing it onto the Tracked board. Start writes a real folder on this machine, under `DASHBOARD_NEW_PROJECT_ROOT` if set, otherwise the first root in `data/dashboard.sources.json`.
 - **Online**: one expandable row per project with a `liveUrl` or `healthCheckUrl`, showing the full latest health result.
@@ -88,6 +89,22 @@ This file is machine-specific and gitignored; without it no roots are scanned. C
 }
 ```
 
+## Running Sessions
+
+The Sessions tab answers one question: which agent sessions are alive on this Mac right now. `GET /api/running-sessions` reads the process table (`ps`) and keeps the processes that are actually a Claude Code or Codex CLI:
+
+- an executable named `claude` or `codex`, or a JS runtime handed a `claude`/`codex` script (the npm install shape, `node .../claude-code/cli.js`);
+- anything inside a `.app` bundle is excluded, so the Claude desktop app and its Electron helpers never show up as sessions;
+- a matched process whose parent also matched is a re-exec of the same session and is counted once.
+
+Each session's working directory comes from `lsof` on macOS (`/proc` on Linux), which is what attributes a session to a tracked project: the deepest configured `localPath` containing that cwd wins, and a folder outside every source root is shown as **Untracked** rather than guessed at.
+
+For Claude sessions the newest JSONL transcript under `~/.claude/projects/<encoded-cwd>/` (override with `CLAUDE_PROJECTS_DIR`) supplies the last activity time and the last prompt the person actually typed — tool results, slash-command plumbing, and meta entries are skipped. Two sessions open in the same folder share one transcript directory and nothing on disk says which file belongs to which pid, so both cards drop the prompt and say so instead of showing a guess. Codex writes no per-cwd transcripts, so its cards carry process facts only.
+
+The view is read-only: it reports pid, tty, uptime, CPU, memory, and the command line, and never signals or kills anything. The scan is cached server-side for 5 seconds; the frontend polls every 15.
+
+Sessions are the one thing on this board that cannot survive a restart of the machine, and the endpoint is as local as the rest of the API — see Security Model.
+
 ## Scheduled Tasks
 
 The Scheduled tab reflects two runners:
@@ -118,7 +135,7 @@ on your standing instruction.
 
 ## Security Model
 
-This dashboard has no built-in authentication and its API exposes local absolute paths, git remotes, notes, and an endpoint that launches agent runs. It is designed to be reachable from this machine only:
+This dashboard has no built-in authentication and its API exposes local absolute paths, git remotes, notes, running agent command lines and prompts, and an endpoint that launches agent runs. It is designed to be reachable from this machine only:
 
 - The server binds `127.0.0.1` by default and refuses to start on a non-loopback `HOST` unless `DASHBOARD_ALLOW_REMOTE=1` is set explicitly.
 - Every request's `Host` header is checked against a fixed allowlist (a DNS-rebinding guard). A reverse proxy or tunnel hostname must be added via `DASHBOARD_ALLOWED_HOSTS` (comma-separated).

@@ -3,6 +3,9 @@ const PINNED_PROJECTS_KEY = "dashboard-pinned-projects";
 const CHECKED_NEXT_STEPS_KEY = "dashboard-checked-next-steps";
 const AUTO_REFRESH_MS = 30000;
 const PRS_REFRESH_MS = 60000;
+// Running sessions are the one genuinely live thing on the board, so they poll
+// faster than anything else here.
+const SESSIONS_REFRESH_MS = 15000;
 const FOCUS_REFRESH_STALE_MS = 5000;
 const NEXT_PROJECT_PREVIEW_LIMIT = 6;
 
@@ -33,6 +36,7 @@ const state = {
   checklist: null,
   checklistCollapsed: false,
   waitingPrs: null,
+  runningSessions: null,
   expandedChecklistItems: new Set(),
   expandedProjects: new Set(),
   expandedNextSteps: new Set(),
@@ -69,6 +73,8 @@ const elements = {
   checklistsView: document.querySelector("#checklists-view"),
   prsView: document.querySelector("#prs-view"),
   prsCount: document.querySelector("#prs-count"),
+  sessionsView: document.querySelector("#sessions-view"),
+  sessionsCount: document.querySelector("#sessions-count"),
   viewTabs: [...document.querySelectorAll(".view-tab")],
   sourceTabs: [...document.querySelectorAll(".source-tab")],
   scheduledSourceTabs: [...document.querySelectorAll(".scheduled-source-tab")],
@@ -1995,6 +2001,129 @@ function renderPrsView() {
   elements.prsView.replaceChildren(...children);
 }
 
+// The count pill on the Sessions rail tab is part of the page base: how many
+// agents are running on this Mac stays visible from every view.
+function updateSessionsBadge() {
+  const count = state.runningSessions?.sessions?.length || 0;
+  elements.sessionsCount.hidden = count === 0;
+  elements.sessionsCount.textContent = String(count);
+}
+
+// Uptime, not an age: a session that started 90 minutes ago reads "1h 30m".
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "Unknown";
+  const total = Math.max(0, Math.round(Number(seconds)));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${total}s`;
+}
+
+function renderSessionCard(session) {
+  const card = document.createElement("article");
+  card.className = "session-card";
+  card.dataset.kind = session.kind;
+
+  const head = document.createElement("div");
+  head.className = "session-head";
+
+  const heading = document.createElement("div");
+  const where = document.createElement("p");
+  where.className = "session-where";
+  where.textContent = session.cwd || "Working directory unavailable";
+  where.title = session.cwd || "";
+  const title = document.createElement("h3");
+  title.textContent = session.projectName || session.folder || `pid ${session.pid}`;
+  heading.append(where, title);
+
+  const badges = document.createElement("div");
+  badges.className = "badge-row";
+  badges.append(createBadge(
+    session.kind === "claude" ? "Claude Code" : "Codex",
+    session.kind === "claude" ? "completed" : "review",
+    "Which agent CLI this process is running"
+  ));
+  badges.append(session.headless
+    ? createBadge("Headless", "muted", "Started with -p/exec: a scheduled, hooked, or scripted run")
+    : createBadge("Interactive", "", "An interactive session attached to a terminal"));
+  if (!session.projectId && session.cwd) {
+    badges.append(createBadge("Untracked", "muted", "This folder is not one of the tracked projects"));
+  }
+  head.append(heading, badges);
+
+  const meta = document.createElement("p");
+  meta.className = "session-meta";
+  meta.textContent = [
+    `pid ${session.pid}`,
+    session.tty ? session.tty : "no tty",
+    `up ${formatDuration(session.elapsedSeconds)}`,
+    `${session.cpuPercent.toFixed(1)}% CPU`,
+    `${session.memoryMb} MB`,
+    session.lastActivityAt ? `last message ${relativeTime(session.lastActivityAt)}` : null
+  ].filter(Boolean).join(" · ");
+
+  card.append(head, meta);
+
+  if (session.lastPrompt) {
+    const prompt = document.createElement("p");
+    prompt.className = "session-prompt";
+    prompt.textContent = session.lastPrompt;
+    card.append(prompt);
+  } else if (session.transcriptNote) {
+    const note = document.createElement("p");
+    note.className = "session-note";
+    note.textContent = session.transcriptNote;
+    card.append(note);
+  }
+
+  const command = document.createElement("p");
+  command.className = "session-command";
+  command.textContent = session.command;
+  card.append(command);
+
+  return card;
+}
+
+function renderSessionsView() {
+  elements.sessionsView.hidden = state.view !== "sessions";
+  // Rebuilt on every render pass; skip the DOM work while hidden behind
+  // another tab (the rail pill updates straight from the poll instead).
+  if (state.view !== "sessions") return;
+
+  if (!state.runningSessions) {
+    const loading = document.createElement("p");
+    loading.className = "empty";
+    loading.textContent = "Looking for running agent sessions...";
+    elements.sessionsView.replaceChildren(loading);
+    return;
+  }
+
+  const sessions = Array.isArray(state.runningSessions.sessions) ? state.runningSessions.sessions : [];
+  const errors = Array.isArray(state.runningSessions.errors) ? state.runningSessions.errors : [];
+  const children = [];
+
+  if (sessions.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No Claude Code or Codex sessions are running on this machine.";
+    children.push(empty);
+  } else {
+    children.push(...sessions.map(renderSessionCard));
+  }
+
+  errors.forEach((entry) => {
+    const note = document.createElement("p");
+    note.className = "pr-error";
+    note.textContent = entry.message;
+    children.push(note);
+  });
+
+  elements.sessionsView.replaceChildren(...children);
+}
+
 function render() {
   const sourceLabel = sourceLabels[state.sourceFilter] || sourceLabels.all;
   const [statusLabel, title] = statusLabels[state.statusFilter] || statusLabels.ongoing;
@@ -2030,6 +2159,7 @@ function render() {
   elements.checklistsView.hidden = state.view !== "checklists";
   renderChecklistsView();
   renderPrsView();
+  renderSessionsView();
 
   renderMetrics(visible);
   renderCompletedPanel();
@@ -2052,7 +2182,7 @@ function render() {
     return;
   }
 
-  if (state.view === "next" || state.view === "checklists" || state.view === "prs") {
+  if (state.view === "next" || state.view === "checklists" || state.view === "prs" || state.view === "sessions") {
     elements.list.replaceChildren();
     return;
   }
@@ -2102,6 +2232,14 @@ async function loadWaitingPrs() {
   state.waitingPrs = await response.json();
   updatePrsBadge();
   renderPrsView();
+}
+
+async function loadRunningSessions() {
+  const response = await fetch("/api/running-sessions");
+  if (!response.ok) throw new Error(`Running session load failed: ${response.status}`);
+  state.runningSessions = await response.json();
+  updateSessionsBadge();
+  renderSessionsView();
 }
 
 async function loadChecklist() {
@@ -2358,6 +2496,16 @@ loadWaitingPrs().catch((error) => {
 window.setInterval(() => {
   loadWaitingPrs().catch(() => {});
 }, PRS_REFRESH_MS);
+
+loadRunningSessions().catch((error) => {
+  showToast(error.message);
+});
+
+// Same deal for the session count: it has to stay honest from every view, and
+// a failed poll keeps the last known list rather than toasting every 15s.
+window.setInterval(() => {
+  loadRunningSessions().catch(() => {});
+}, SESSIONS_REFRESH_MS);
 
 loadProjects().then(() => {
   // Fill the Online section with real statuses without delaying first paint.

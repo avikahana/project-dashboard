@@ -1576,12 +1576,94 @@ button.link-pill:disabled {
   font-size: 0.8rem;
 }
 
+.sessions-view {
+  display: grid;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.sessions-view[hidden] {
+  display: none;
+}
+
+/* Green rather than the PR pill's red: a running session is activity to see,
+   not a queue to clear. */
+.tab-count.live {
+  background: var(--green);
+}
+
+.session-card {
+  display: grid;
+  gap: 8px;
+  padding: 16px 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 6px solid var(--muted);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.session-card[data-kind="claude"] { border-left-color: var(--green); }
+.session-card[data-kind="codex"] { border-left-color: var(--amber); }
+
+.session-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.session-where {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.session-head h3 {
+  overflow-wrap: anywhere;
+}
+
+.session-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.session-prompt {
+  margin: 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--line);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.session-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+.session-command {
+  margin: 0;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 720px) {
-  .pr-head {
+  .pr-head,
+  .session-head {
     flex-direction: column;
   }
 
-  .pr-head .badge-row {
+  .pr-head .badge-row,
+  .session-head .badge-row {
     justify-content: flex-start;
   }
 }

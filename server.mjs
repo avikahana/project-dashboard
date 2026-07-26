@@ -9,6 +9,7 @@ import { dismissSuggestion, startSuggestion } from "./lib/next-projects.mjs";
 import { getHiddenProjects, setProjectHidden } from "./lib/prefs.mjs";
 import { getChecklist, setChecklistItemDone } from "./lib/checklist.mjs";
 import { getWaitingPrs } from "./lib/waiting-prs.mjs";
+import { getRunningSessions } from "./lib/running-sessions.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4173);
@@ -411,6 +412,15 @@ async function handleApi(req, res, requestUrl) {
     // hammers gh or the GitHub API.
     const cached = await getEnrichedProjects();
     sendJson(res, 200, await getWaitingPrs(cached.projects));
+    return;
+  }
+
+  if (requestUrl.pathname === "/api/running-sessions") {
+    // Live agent sessions on this machine. The project list rides the enriched
+    // -projects cache so a session's cwd can be attributed to a tracked card;
+    // the process scan itself is cached inside lib/running-sessions.mjs.
+    const cached = await getEnrichedProjects();
+    sendJson(res, 200, await getRunningSessions(cached.projects));
     return;
   }
 
