@@ -4,7 +4,6 @@ import { access, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mergeProjectStatusFile, moveProjectStatus, syncProjects } from "./lib/project-sync.mjs";
-import { getLastRun, runAutomation, setAutomationStatus } from "./lib/automation-actions.mjs";
 import { dismissSuggestion, startSuggestion } from "./lib/next-projects.mjs";
 import { getHiddenProjects, setProjectHidden } from "./lib/prefs.mjs";
 import { getChecklist, setChecklistItemDone } from "./lib/checklist.mjs";
@@ -540,66 +539,6 @@ async function handleApi(req, res, requestUrl) {
       }
       throw error;
     }
-    return;
-  }
-
-  // Scheduled card actions. The id is only ever matched against automations
-  // discovered on disk; it never reaches the filesystem or a shell. The
-  // optional runner hint disambiguates a Codex automation and a Claude task
-  // that happen to share an id.
-  const automationMatch = requestUrl.pathname.match(/^\/api\/automations\/([A-Za-z0-9._-]+)\/(pause|resume|run|last-run)$/);
-  if (automationMatch) {
-    const [, automationId, action] = automationMatch;
-    const runner = requestUrl.searchParams.get("runner");
-
-    if (action === "last-run") {
-      if (req.method !== "GET") {
-        sendJson(res, 405, { error: "Use GET for last-run" });
-        return;
-      }
-      const result = await getLastRun(automationId, runner);
-      if (!result) {
-        sendJson(res, 404, { error: `Unknown automation: ${automationId}` });
-        return;
-      }
-      sendJson(res, 200, result);
-      return;
-    }
-
-    if (req.method !== "POST") {
-      sendJson(res, 405, { error: `Use POST for ${action}` });
-      return;
-    }
-
-    if (action === "run") {
-      try {
-        const result = await runAutomation(automationId, runner);
-        if (!result) {
-          sendJson(res, 404, { error: `Unknown automation: ${automationId}` });
-          return;
-        }
-        sendJson(res, 202, result);
-      } catch (error) {
-        if (error.code === "RUN_ACTIVE") {
-          sendJson(res, 409, { error: error.message });
-          return;
-        }
-        if (error.code === "NO_CODEX" || error.code === "NO_CLAUDE" || error.code === "NO_PROMPT") {
-          sendJson(res, 503, { error: error.message });
-          return;
-        }
-        throw error;
-      }
-      return;
-    }
-
-    const result = await setAutomationStatus(automationId, action, runner);
-    if (!result) {
-      sendJson(res, 404, { error: `Unknown automation: ${automationId}` });
-      return;
-    }
-    invalidateProjectsCache();
-    sendJson(res, 200, result);
     return;
   }
 

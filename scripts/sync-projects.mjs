@@ -6,7 +6,6 @@ const result = await syncProjects({ write: !dryRun });
 console.log(JSON.stringify({
   written: result.written,
   discovered: result.discovered,
-  automations: result.automations,
   retained: result.retained,
   total: result.total,
   statusFiles: result.statusFiles,

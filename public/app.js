@@ -18,8 +18,6 @@ function readStoredSet(key) {
 const state = {
   projects: [],
   view: localStorage.getItem("dashboard-view") || "projects",
-  sourceFilter: "all",
-  scheduledSource: "all",
   statusFilter: "all",
   sortMode: "progress",
   query: "",
@@ -43,10 +41,8 @@ const state = {
   pinnedProjects: readStoredSet(PINNED_PROJECTS_KEY),
   checkedNextSteps: readStoredSet(CHECKED_NEXT_STEPS_KEY),
   activeMenuProjectId: null,
-  activeStatusMenuProjectId: null,
   moveMenuProjectId: null,
   healthById: new Map(),
-  automationRuns: new Map(),
   toastTimer: null,
   loadingProjects: null,
   projectLoadVersion: 0,
@@ -64,14 +60,11 @@ const elements = {
   template: document.querySelector("#project-card-template"),
   search: document.querySelector("#search"),
   controlBand: document.querySelector(".control-band"),
-  scheduledBand: document.querySelector("#scheduled-band"),
   projectsHead: document.querySelector("#projects-head"),
   checklistsView: document.querySelector("#checklists-view"),
   prsView: document.querySelector("#prs-view"),
   prsCount: document.querySelector("#prs-count"),
   viewTabs: [...document.querySelectorAll(".view-tab")],
-  sourceTabs: [...document.querySelectorAll(".source-tab")],
-  scheduledSourceTabs: [...document.querySelectorAll(".scheduled-source-tab")],
   statusTabs: [...document.querySelectorAll(".status-tab")],
   sortTabs: [...document.querySelectorAll(".sort-tab")],
   refreshProjects: document.querySelector("#refresh-projects"),
@@ -89,7 +82,6 @@ const elements = {
   metrics: {
     showing: document.querySelector("#metric-showing"),
     planning: document.querySelector("#metric-planning"),
-    scheduled: document.querySelector("#metric-scheduled"),
     completed: document.querySelector("#metric-completed"),
     online: document.querySelector("#metric-online"),
     review: document.querySelector("#metric-review")
@@ -102,12 +94,6 @@ function applyTheme() {
   elements.themeToggleLabel.textContent = state.theme === "dark" ? "Dark" : "Light";
 }
 
-const sourceLabels = {
-  all: "All",
-  claude: "Claude",
-  codex: "Codex"
-};
-
 const statusLabels = {
   all: ["All", "Every tracked project"],
   ongoing: ["Ongoing", "Current work"],
@@ -116,21 +102,10 @@ const statusLabels = {
   duplicates: ["Duplicates", "Name or source collisions"]
 };
 
-const sourceDisplayLabels = {
-  claude: "Claude",
-  "codex-workspace": "Codex workspace",
-  "codex-local": "Codex local"
-};
-
 // Order and display labels for the collapsible status groups.
 const PRIVATE_GROUP_KEY = "private-list";
 const PINNED_GROUP_KEY = "pinned-projects";
-const GROUP_ORDER = [PINNED_GROUP_KEY, "active", "scheduled", "maintenance", "planning", "paused", "blocked", "completed", PRIVATE_GROUP_KEY];
-
-function isScheduledProject(project) {
-  const tags = new Set((project.tags || []).map((tag) => String(tag).toLowerCase()));
-  return tags.has("scheduled") || tags.has("automation") || tags.has("reminders") || tags.has("monitors");
-}
+const GROUP_ORDER = [PINNED_GROUP_KEY, "active", "maintenance", "planning", "paused", "blocked", "completed", PRIVATE_GROUP_KEY];
 
 function isOnlineProject(project) {
   return Boolean(project.liveUrl || project.healthCheckUrl || project.type === "online");
@@ -138,10 +113,11 @@ function isOnlineProject(project) {
 
 // Online membership is additive: online projects still land in their status
 // group here, and additionally get a card in the separate Online section.
+// Bot entries are grouped by bot name; everything else falls back to status.
 function groupKey(project) {
   if (state.pinnedProjects.has(projectId(project))) return PINNED_GROUP_KEY;
   if (state.hiddenProjects.has(projectId(project))) return PRIVATE_GROUP_KEY;
-  if (isScheduledProject(project)) return "scheduled";
+  if (project.bot) return `bot:${project.bot.name}`;
   return statusClass(project.status || "other") || "other";
 }
 
@@ -151,9 +127,14 @@ function onlineDisplayName(project) {
 
 function sortGroups(keys) {
   return [...keys].sort((a, b) => {
+    const aBot = a.startsWith("bot:");
+    const bBot = b.startsWith("bot:");
+    if (aBot && bBot) return a.localeCompare(b);
     const ia = GROUP_ORDER.indexOf(a);
     const ib = GROUP_ORDER.indexOf(b);
-    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib) || a.localeCompare(b);
+    const aOrder = aBot ? 0.5 : ia === -1 ? 999 : ia;
+    const bOrder = bBot ? 0.5 : ib === -1 ? 999 : ib;
+    return aOrder - bOrder || a.localeCompare(b);
   });
 }
 
@@ -292,12 +273,15 @@ function statusClass(value = "") {
 }
 
 function projectNeedsReview(project) {
-  if (isScheduledProject(project)) {
-    return Boolean(project.nameCollision || project.sourceCollision);
+  const missingProgress = project.progress === null || project.progress === undefined;
+  if (project.bot && missingProgress) {
+    return project.confidence === "low" ||
+      Boolean(project.nameCollision) ||
+      Boolean(project.health && (project.health.status === "Down" || project.health.error)) ||
+      Boolean(project.localPath && !project.localPathFound);
   }
 
-  return project.progress === null ||
-    project.progress === undefined ||
+  return missingProgress ||
     project.confidence === "low" ||
     Boolean(project.nameCollision) ||
     Boolean(project.health && (project.health.status === "Down" || project.health.error)) ||
@@ -305,44 +289,7 @@ function projectNeedsReview(project) {
 }
 
 function isOngoing(project) {
-  return statusClass(project.status) !== "completed" && !isScheduledProject(project);
-}
-
-function isClaudeProject(project) {
-  return project.type === "claude" ||
-    (project.tags || []).includes("claude") ||
-    String(project.localPath || "").includes("/Workspace/Claude/");
-}
-
-function isCodexProject(project) {
-  const localPath = String(project.localPath || "");
-  return project.type === "codex" ||
-    (project.tags || []).includes("codex") ||
-    localPath.includes("/Workspace/Codex/") ||
-    localPath.includes("/Documents/Codex/");
-}
-
-function matchesSource(project) {
-  if (state.sourceFilter === "claude") return isClaudeProject(project);
-  if (state.sourceFilter === "codex") return isCodexProject(project);
-  return true;
-}
-
-// Scheduled tasks come from two runners: Claude scheduled tasks carry a
-// claude-task marker (source, tag, or automation kind), Codex automations
-// carry source codex-automation.
-function scheduledTaskSource(project) {
-  const tags = (project.tags || []).map((tag) => String(tag).toLowerCase());
-  if (project.source === "claude-task" || tags.includes("claude-task") || project.automation?.kind === "claude-task") return "claude";
-  if (project.source === "codex-automation" || project.automationFile || project.automation) return "codex";
-  if (isClaudeProject(project)) return "claude";
-  if (isCodexProject(project)) return "codex";
-  return null;
-}
-
-function matchesScheduledSource(project) {
-  if (state.scheduledSource === "all") return true;
-  return scheduledTaskSource(project) === state.scheduledSource;
+  return statusClass(project.status) !== "completed";
 }
 
 function matchesStatus(project) {
@@ -378,8 +325,7 @@ function labelize(value) {
 }
 
 function sourceLabel(project) {
-  if (project.source === "codex-automation" || project.source === "claude-task") return "Scheduled";
-  return sourceDisplayLabels[project.source] || labelize(project.source || project.type || "unknown");
+  return labelize(project.source || project.type || "unknown");
 }
 
 function projectRole(project) {
@@ -389,20 +335,12 @@ function projectRole(project) {
   if (tags.has("brain") || name.includes("brain")) return "Private Brain";
   if (tags.has("repo") || project.type === "repo" || project.repoUrl) return "Product repo";
   if (project.type === "online" || project.liveUrl || project.healthCheckUrl) return "Live website";
-  if (isScheduledProject(project)) return "Automation control";
   if (tags.has("knowledge") || tags.has("source")) return "Knowledge workspace";
   if (tags.has("resume") || tags.has("career")) return "Career workspace";
   if (tags.has("home-assistant") || tags.has("integration")) return "Integration workspace";
   if (tags.has("legal")) return "Legal workspace";
   if (project.confidence === "low" || tags.has("needs-review")) return "Needs triage";
   return "Project workspace";
-}
-
-function scheduledMeta(project) {
-  if (!isScheduledProject(project)) return null;
-  // automation.status is the raw TOML literal (e.g. "ACTIVE") and labelize
-  // never lowercases, so normalize case here.
-  return labelize(String(project.automation?.status || project.status || "scheduled").toLowerCase());
 }
 
 function pathShortName(project) {
@@ -611,23 +549,6 @@ async function shareProjectContext(project) {
   showToast("Agent context copied");
 }
 
-function automationApiId(project) {
-  // Any card carrying automation metadata is controllable: Codex automations
-  // and Claude scheduled tasks share the same /api/automations endpoints.
-  return project.automation?.id || null;
-}
-
-// The two runners share one id namespace on the API, so every call carries a
-// runner hint; without it a Codex automation with the same id would shadow
-// the Claude task (or the other way around).
-function automationRunner(project) {
-  return project.automation?.kind === "claude-task" ? "claude" : "codex";
-}
-
-function automationActionUrl(project, action) {
-  return `/api/automations/${encodeURIComponent(automationApiId(project))}/${action}?runner=${automationRunner(project)}`;
-}
-
 // Move targets are the canonical group words statusClass() maps to. Pinned
 // (browser-local) and Private (server-persisted prefs) are toggles, not
 // statuses, and Scheduled is automation-only, so none of them appear here.
@@ -650,121 +571,6 @@ async function moveProjectToGroup(project, status, label) {
   } catch (error) {
     showToast(error.message);
   }
-}
-
-async function postAutomationAction(project, action) {
-  const response = await fetch(automationActionUrl(project, action), { method: "POST" });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `${action} failed: ${response.status}`);
-  return payload;
-}
-
-async function refreshAutomationRuns() {
-  const automationProjects = state.projects.filter((project) => automationApiId(project));
-  if (automationProjects.length === 0) return;
-
-  await Promise.all(automationProjects.map(async (project) => {
-    try {
-      const response = await fetch(automationActionUrl(project, "last-run"));
-      if (!response.ok) return;
-      const payload = await response.json();
-      state.automationRuns.set(projectId(project), payload.run || null);
-    } catch {
-      // Keep the previous run state when the server is briefly unreachable.
-    }
-  }));
-  render();
-}
-
-function automationStatusLabel(project) {
-  return String(project.automation?.status || "").toUpperCase() === "PAUSED" ? "Paused" : "Active";
-}
-
-function createStatusDropdown(project) {
-  const id = projectId(project);
-  const current = automationStatusLabel(project);
-  const open = state.activeStatusMenuProjectId === id;
-
-  const wrap = document.createElement("span");
-  wrap.className = "status-menu-wrap";
-
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.className = `badge badge-button ${statusClass(current)}`.trim();
-  toggle.textContent = `Status: ${current} ▾`;
-  toggle.title = "Change this automation's schedule status";
-  toggle.setAttribute("aria-haspopup", "menu");
-  toggle.setAttribute("aria-expanded", String(open));
-  toggle.addEventListener("click", (event) => {
-    event.stopPropagation();
-    state.activeStatusMenuProjectId = open ? null : id;
-    state.activeMenuProjectId = null;
-    render();
-  });
-  wrap.append(toggle);
-
-  if (open) {
-    const menu = document.createElement("div");
-    menu.className = "row-menu";
-    menu.setAttribute("role", "menu");
-    menu.addEventListener("click", (event) => event.stopPropagation());
-
-    // Only statuses the automation can switch TO: the current one is already
-    // the toggle itself, so it never repeats inside the menu.
-    ["Active", "Paused"].filter((option) => option !== current).forEach((option) => {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.setAttribute("role", "menuitem");
-      item.textContent = option;
-      item.addEventListener("click", async () => {
-        state.activeStatusMenuProjectId = null;
-        render();
-        try {
-          await postAutomationAction(project, option === "Paused" ? "pause" : "resume");
-          showToast(option === "Paused" ? "Schedule paused" : "Schedule resumed");
-          await loadProjects({ force: true });
-        } catch (error) {
-          showToast(error.message);
-        }
-      });
-      menu.append(item);
-    });
-    wrap.append(menu);
-  }
-
-  return wrap;
-}
-
-function createRunButton(project, run) {
-  const running = run?.status === "running";
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "link-pill";
-  button.textContent = running ? "Running..." : run ? "Run again" : "Run now";
-  button.disabled = running;
-  button.title = describeAutomationRun(run);
-  button.addEventListener("click", async () => {
-    const runnerLabel = automationRunner(project) === "claude" ? "the Claude Code CLI" : "codex exec";
-    if (!window.confirm(`Run "${project.name}" now via ${runnerLabel}?`)) return;
-    button.disabled = true;
-    button.textContent = "Starting...";
-    try {
-      await postAutomationAction(project, "run");
-      showToast("Run started");
-    } catch (error) {
-      showToast(error.message);
-    }
-    refreshAutomationRuns();
-  });
-  return button;
-}
-
-function describeAutomationRun(run) {
-  if (!run) return "Never triggered";
-  if (run.status === "running") return `Running since ${compactDate(run.startedAt)}`;
-  if (run.status === "finished-untracked") return `Finished, outcome untracked (started ${compactDate(run.startedAt)})`;
-  const outcome = run.status === "succeeded" ? "Succeeded" : "Failed";
-  return `${outcome} ${compactDate(run.finishedAt || run.startedAt)}`;
 }
 
 // Long free-text card fields (next action, notes) are clamped by CSS with a
@@ -802,24 +608,18 @@ function renderProject(project) {
   node.querySelector("h3").textContent = project.name;
 
   const badges = node.querySelector(".badge-row");
-  if (automationApiId(project)) {
-    badges.append(createStatusDropdown(project));
-  } else {
-    badges.append(createBadge(`Status: ${labelize(project.status)}`, statusClass(project.status), "Current workflow state for this project"));
-  }
+  badges.append(createBadge(`Status: ${labelize(project.status)}`, statusClass(project.status), "Current workflow state for this project"));
   badges.append(createBadge(project.confidence ? `Confidence: ${labelize(project.confidence)}` : "Confidence: Unknown", project.confidence === "low" ? "review" : "", "How sure the dashboard seed data is"));
   badges.append(createBadge(projectRole(project), "", "What role this tracked project plays"));
   badges.append(createBadge(sourceLabel(project), "", "Dashboard source root for this card"));
   if (healthStatus) badges.append(createBadge(`Health: ${healthStatus}`, statusClass(healthStatus), "Live website or bot health, separate from progress"));
-  const automationRun = automationApiId(project) ? state.automationRuns.get(projectId(project)) : null;
-  if (automationRun?.status === "running") badges.append(createBadge("Manual run: Running", "active", `A dashboard-triggered ${automationRunner(project) === "claude" ? "Claude Code" : "codex exec"} run is in progress`));
   if (project.nameCollision) badges.append(createBadge("Same name", "review", `Also tracked as ${project.nameCollision.homes.join("; ")}`));
   if (project.sourceCollision) badges.append(createBadge("Same source", "review", "Multiple dashboard records point at the same status file or local path"));
   if (projectNeedsReview(project)) badges.append(createBadge("Review needed", "review", "Some project fields are missing, uncertain, or need confirmation"));
 
-  progressValue.textContent = scheduledMeta(project) || (progress === null ? "Progress unknown" : `${progress}%`);
+  progressValue.textContent = progress === null ? "Progress unknown" : `${progress}%`;
   progressValue.classList.toggle("is-unknown", progress === null);
-  node.querySelector(".phase").textContent = project.automation?.schedule || project.phase || "Unknown phase";
+  node.querySelector(".phase").textContent = project.phase || "Unknown phase";
   node.querySelector(".progress-track span").style.setProperty("--progress-width", progress === null ? "0%" : `${Math.max(0, Math.min(100, progress))}%`);
   setExpandableCardText(node.querySelector(".next-action"), project.nextAction ? `Next: ${project.nextAction}` : "Next: Not set", `${id}::next`);
   setExpandableCardText(node.querySelector(".notes"), project.notes || "", `${id}::notes`);
@@ -870,11 +670,10 @@ function renderProject(project) {
 
   const evidence = node.querySelector(".evidence");
   appendEvidence(evidence, "Role", projectRole(project), "How this card should be interpreted");
-  if (project.automation) {
-    appendEvidence(evidence, "Schedule", project.automation.schedule, "When this automation is configured to run");
-    appendEvidence(evidence, "Kind", labelize(project.automation.kind || "automation"), "Automation type");
-    appendEvidence(evidence, "Model", project.automation.model, "Model configured for this scheduled run");
-    appendEvidence(evidence, "Manual run", describeAutomationRun(automationRun), "Latest run triggered from this dashboard");
+  if (project.bot) {
+    appendEvidence(evidence, "Bot", project.bot.name, "Which AI bot owns this workstream");
+    if (project.bot.domain) appendEvidence(evidence, "Domain", project.bot.domain, "The bot's area of responsibility");
+    if (project.bot.waitingOn) appendEvidence(evidence, "Waiting on", project.bot.waitingOn, "Who or what this bot is waiting on");
   }
   appendEvidence(evidence, "Source", sourceLabel(project), "Dashboard source root that discovered this project");
   appendEvidence(evidence, "Folder", project.localPathFound ? "Found" : project.localPath ? "Missing" : "Not set", "Whether the configured localPath exists on this Mac");
@@ -888,7 +687,6 @@ function renderProject(project) {
   appendEvidence(evidence, "Completed", project.completedAt || "Not completed", "Completion date from the dashboard config");
 
   const links = node.querySelector(".links");
-  if (automationApiId(project)) links.append(createRunButton(project, automationRun));
   if (project.projectHome || project.localPath) links.append(createCopyButton("Copy home", project.projectHome || project.localPath));
   if (project.repoPath) links.append(createCopyButton("Copy repo", project.repoPath));
   if (repoUrl) links.append(createLink("Repo", repoUrl));
@@ -964,21 +762,22 @@ function renderCompactRow(project) {
     flag.textContent = "review";
     title.append(flag);
   }
-  if (automationApiId(project) && state.automationRuns.get(id)?.status === "running") {
-    const flag = document.createElement("span");
-    flag.className = "row-flag";
-    flag.title = "A dashboard-triggered run is in progress";
-    flag.textContent = "running";
-    title.append(flag);
-  }
-
   const home = document.createElement("span");
   home.className = "row-home";
-  home.textContent = hidden && !expanded ? "Private" : `${sourceLabel(project)} / ${projectRole(project)} / ${pathShortName(project)}`;
+  if (hidden && !expanded) {
+    home.textContent = "Private";
+  } else if (project.bot) {
+    const parts = [labelize(project.status)];
+    if (project.bot.waitingOn) parts[0] = `Blocked · ${project.bot.waitingOn}`;
+    if (project.bot.domain) parts.push(project.bot.domain);
+    home.textContent = parts.join(" / ");
+  } else {
+    home.textContent = `${sourceLabel(project)} / ${projectRole(project)} / ${pathShortName(project)}`;
+  }
 
   const meta = document.createElement("span");
   meta.className = "row-meta";
-  meta.textContent = scheduledMeta(project) || (progress === null ? "—" : `${progress}%`);
+  meta.textContent = progress === null ? "—" : `${progress}%`;
   if (progress === null) meta.classList.add("is-unknown");
 
   trigger.append(chevron, dot, title, home, meta);
@@ -1080,9 +879,8 @@ function renderCompactRow(project) {
       }
 
       // Group moves rewrite the project's own .project-status.json, so they
-      // need one; scheduled cards keep their registry-backed status dropdown
-      // instead. Picking a group for a private card also brings it back.
-      if (project.statusFile && !isScheduledProject(project)) {
+      // need one. Picking a group for a private card also brings it back.
+      if (project.statusFile) {
         MOVE_TARGETS.filter(([value]) => value !== statusClass(project.status)).forEach(([value, label]) => {
           menu.append(subItem(label, () => {
             if (hidden) {
@@ -1110,19 +908,7 @@ function renderCompactRow(project) {
     menuWrap.append(menu);
   }
 
-  // Surface automation controls on the collapsed row so they are visible
-  // without expanding; the expanded card repeats them, so hide them then.
-  if (!expanded && automationApiId(project)) {
-    const actions = document.createElement("div");
-    actions.className = "row-actions";
-    actions.append(
-      createRunButton(project, state.automationRuns.get(id) || null),
-      createStatusDropdown(project)
-    );
-    rowHead.append(trigger, actions, menuWrap);
-  } else {
-    rowHead.append(trigger, menuWrap);
-  }
+  rowHead.append(trigger, menuWrap);
   row.append(rowHead);
 
   if (expanded) {
@@ -1164,7 +950,7 @@ function renderGroupedList(container, projects, { withHeads = true } = {}) {
 
       const gname = document.createElement("span");
       gname.className = "group-name";
-      gname.textContent = labelize(key);
+      gname.textContent = key.startsWith("bot:") ? key.slice(4) : labelize(key);
 
       const gcount = document.createElement("span");
       gcount.className = "group-count";
@@ -1211,15 +997,10 @@ function onlineStatusText(health) {
 
 function focusProjectCard(project) {
   const id = projectId(project);
-  state.view = isScheduledProject(project) ? "scheduled" : "projects";
+  state.view = "projects";
   localStorage.setItem("dashboard-view", state.view);
-  // The project may be filtered out of the target view (completed site,
-  // other source or runner), so fall back to the widest view.
-  if (state.view === "scheduled") {
-    if (!matchesScheduledSource(project)) state.scheduledSource = "all";
-  } else if (!getProjectViewProjects().some((candidate) => projectId(candidate) === id)) {
+  if (!getProjectViewProjects().some((candidate) => projectId(candidate) === id)) {
     state.statusFilter = "all";
-    state.sourceFilter = "all";
   }
   state.collapsedGroups.delete(groupKey(project));
   state.expandedProjects.add(id);
@@ -1446,40 +1227,31 @@ function updateGroupToggle(visible) {
   elements.toggleGroups.textContent = allVisibleExpanded(visible) ? "Collapse all" : "Expand all";
 }
 
-function getScopedProjects() {
-  return state.projects.filter(matchesSource);
-}
-
 function getVisibleProjects() {
-  return getScopedProjects().filter((project) => matchesStatus(project) && matchesSearch(project));
+  return state.projects.filter((project) => matchesStatus(project) && matchesSearch(project));
 }
 
-// Scheduled automations live on their own view tab, never in the tracked list.
 function getProjectViewProjects() {
-  return getVisibleProjects().filter((project) => !isScheduledProject(project));
+  return getVisibleProjects();
 }
 
-// The metric strip is part of the shared page base, so it always counts every
-// project; the Claude/Codex source tabs scope only the tracked list.
-function renderMetrics(visible) {
-  const scoped = state.projects;
-  const ongoing = scoped.filter(isOngoing).length;
-  const planning = scoped.filter((project) => statusClass(project.status) === "planning").length;
-  const completed = scoped.filter((project) => statusClass(project.status) === "completed").length;
-  const scheduled = scoped.filter(isScheduledProject).length;
-  const onlineProjects = scoped.filter(isOnlineProject);
-  const review = scoped.filter(projectNeedsReview).length;
+function renderMetrics() {
+  const all = state.projects;
+  const ongoing = all.filter(isOngoing).length;
+  const planning = all.filter((project) => statusClass(project.status) === "planning").length;
+  const completed = all.filter((project) => statusClass(project.status) === "completed").length;
+  const onlineProjects = all.filter(isOnlineProject);
+  const review = all.filter(projectNeedsReview).length;
 
   elements.metrics.showing.textContent = ongoing;
   elements.metrics.planning.textContent = planning;
-  elements.metrics.scheduled.textContent = scheduled;
   elements.metrics.completed.textContent = completed;
   elements.metrics.online.textContent = onlineProjects.length;
   elements.metrics.review.textContent = review;
 }
 
 function renderCompletedPanel() {
-  const completed = getScopedProjects()
+  const completed = state.projects
     .filter((project) => statusClass(project.status) === "completed")
     .sort((a, b) => String(b.completedAt || "").localeCompare(String(a.completedAt || "")));
   const visible = state.showAllCompleted ? completed : completed.slice(0, 3);
@@ -1839,7 +1611,6 @@ function renderChecklistsView() {
 
   const items = state.projects
     .filter((project) => !state.hiddenProjects.has(projectId(project)))
-    .filter((project) => !isScheduledProject(project))
     .filter((project) => {
       const action = String(project.nextAction || "").trim();
       return action && !/^none\b/i.test(action);
@@ -1996,23 +1767,14 @@ function renderPrsView() {
 }
 
 function render() {
-  const sourceLabel = sourceLabels[state.sourceFilter] || sourceLabels.all;
   const [statusLabel, title] = statusLabels[state.statusFilter] || statusLabels.ongoing;
   const visible = getProjectViewProjects();
-  elements.viewEyebrow.textContent = `${sourceLabel} / ${statusLabel}`;
+  elements.viewEyebrow.textContent = statusLabel;
   elements.viewTitle.textContent = title;
   elements.lastUpdated.textContent = state.generatedAt ? `Updated ${compactDate(state.generatedAt)}` : "Not loaded";
 
   elements.viewTabs.forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.view === state.view);
-  });
-
-  elements.sourceTabs.forEach((tab) => {
-    tab.classList.toggle("is-active", tab.dataset.sourceFilter === state.sourceFilter);
-  });
-
-  elements.scheduledSourceTabs.forEach((tab) => {
-    tab.classList.toggle("is-active", tab.dataset.scheduledSource === state.scheduledSource);
   });
 
   elements.statusTabs.forEach((tab) => {
@@ -2026,12 +1788,11 @@ function render() {
   const onProjectsView = state.view === "projects";
   elements.controlBand.hidden = !onProjectsView;
   elements.projectsHead.hidden = !onProjectsView;
-  elements.scheduledBand.hidden = state.view !== "scheduled";
   elements.checklistsView.hidden = state.view !== "checklists";
   renderChecklistsView();
   renderPrsView();
 
-  renderMetrics(visible);
+  renderMetrics();
   renderCompletedPanel();
   renderNextProjects();
 
@@ -2054,21 +1815,6 @@ function render() {
 
   if (state.view === "next" || state.view === "checklists" || state.view === "prs") {
     elements.list.replaceChildren();
-    return;
-  }
-
-  if (state.view === "scheduled") {
-    const scheduled = state.projects.filter(isScheduledProject).filter(matchesScheduledSource);
-    if (scheduled.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "empty";
-      empty.textContent = state.scheduledSource === "all"
-        ? "No scheduled automations are tracked yet."
-        : `No ${state.scheduledSource === "claude" ? "Claude" : "Codex"} scheduled tasks are tracked yet.`;
-      elements.list.replaceChildren(empty);
-    } else {
-      renderGroupedList(elements.list, scheduled, { withHeads: false });
-    }
     return;
   }
 
@@ -2137,7 +1883,6 @@ async function loadProjects({ includeHealth = false, quiet = false, force = fals
     applyCapabilities(payload.capabilities);
     state.generatedAt = payload.generatedAt;
     render();
-    refreshAutomationRuns().catch(() => {});
   })();
   state.loadingProjects = currentLoad;
 
@@ -2258,20 +2003,6 @@ elements.viewTabs.forEach((tab) => {
   });
 });
 
-elements.sourceTabs.forEach((tab) => {
-  tab.addEventListener("click", () => {
-    state.sourceFilter = tab.dataset.sourceFilter;
-    render();
-  });
-});
-
-elements.scheduledSourceTabs.forEach((tab) => {
-  tab.addEventListener("click", () => {
-    state.scheduledSource = tab.dataset.scheduledSource;
-    render();
-  });
-});
-
 elements.statusTabs.forEach((tab) => {
   tab.addEventListener("click", () => {
     state.statusFilter = tab.dataset.statusFilter;
@@ -2291,9 +2022,8 @@ elements.search.addEventListener("input", (event) => {
   render();
 });
 document.addEventListener("click", () => {
-  if (!state.activeMenuProjectId && !state.activeStatusMenuProjectId) return;
+  if (!state.activeMenuProjectId) return;
   state.activeMenuProjectId = null;
-  state.activeStatusMenuProjectId = null;
   state.moveMenuProjectId = null;
   render();
 });

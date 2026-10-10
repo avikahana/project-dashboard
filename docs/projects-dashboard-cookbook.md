@@ -29,7 +29,7 @@ Create a `.project-status.json` file in each tracked project root.
 {
   "name": "Example Product Repo",
   "status": "building",
-  "type": "codex",
+  "type": "local",
   "repoUrl": "https://github.com/example/example-product",
   "liveUrl": null,
   "healthCheckUrl": null,
@@ -165,7 +165,7 @@ If you want to post about a local dashboard publicly, avoid sharing:
 - secret-risk locations
 - unfinished sensitive project names
 - raw agent handoffs
-- local automation prompts that contain private context
+- local prompts that contain private context
 
 Instead, share the pattern:
 
@@ -191,20 +191,7 @@ A good idea card should include:
 - what the first concrete experiment would be
 - whether it needs a repo, research note, or no action yet
 
-## Recipe 10: Treat Run Buttons As Real Agent Launches
-
-If the dashboard mirrors scheduled agent tasks (Codex automations, Claude Code scheduled tasks), a "Run now" button is not a UI refresh. It spawns a real CLI agent process on the host machine with the task's own prompt and working directory.
-
-Design rules that keep this sane:
-
-- Ask for confirmation before every run, and name the runner in the prompt.
-- Pin the agent's tool allowlist server-side, so a task prompt cannot escalate to shell access or external connectors.
-- Allow one concurrent run per task, with a hard timeout.
-- Log every run to a file and show the outcome on the card.
-- Keep pause/resume edits surgical: flip only the one field the runner owns, write atomically, and change nothing else in the runner's files.
-- Never expose any of this beyond loopback without an authenticating proxy in front.
-
-## Recipe 11: Use The Dashboard As An Operating Ritual
+## Recipe 10: Use The Dashboard As An Operating Ritual
 
 The ritual is the product:
 
@@ -227,7 +214,7 @@ The dashboard just discovers those files, merges them with git metadata and opti
 
 The most useful field is not progress. It is `nextAction`.
 
-When an agent session ends, it updates the project status file and leaves the next session one specific restart point. That tiny discipline makes local projects much easier to resume, especially when work jumps between humans, Claude, Codex, browser tools, repos, and private notes.
+When an agent session ends, it updates the project status file and leaves the next session one specific restart point. That tiny discipline makes local projects much easier to resume, especially when work jumps between humans, AI bots, browser tools, repos, and private notes.
 
 The pattern I like:
 
@@ -251,8 +238,6 @@ dashboard/
     styles.css
   lib/
     project-sync.mjs
-    claude-tasks.mjs
-    automation-actions.mjs
     json-files.mjs
   scripts/
     sync-projects.mjs

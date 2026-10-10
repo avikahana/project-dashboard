@@ -248,7 +248,7 @@ html[data-theme="light"] .theme-toggle-thumb {
 
 .status-strip {
   display: grid;
-  grid-template-columns: repeat(6, minmax(130px, 1fr));
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
   gap: 12px;
   margin: 22px 0 24px;
 }
@@ -334,22 +334,6 @@ html[data-theme="light"] .theme-toggle-thumb {
   margin-bottom: 22px;
 }
 
-/* Scheduled tab source strip: same boxed source tabs as the tracked filters,
-   but standalone, so no divider line under the buttons. */
-.scheduled-band {
-  display: flex;
-  margin-bottom: 22px;
-}
-
-.scheduled-band[hidden] {
-  display: none;
-}
-
-.scheduled-band .source-tabs {
-  padding-bottom: 0;
-  border-bottom: 0;
-}
-
 .tabs {
   gap: 8px;
   flex-wrap: wrap;
@@ -363,23 +347,6 @@ html[data-theme="light"] .theme-toggle-thumb {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: color-mix(in srgb, var(--panel) 78%, var(--paper));
-}
-
-.source-tabs {
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--line);
-}
-
-.source-tabs .tab {
-  min-width: 106px;
-  min-height: 44px;
-  background: color-mix(in srgb, var(--panel-soft) 42%, var(--panel));
-}
-
-.source-tabs .tab.is-active {
-  background: var(--cobalt);
-  border-color: var(--cobalt);
-  color: #fff;
 }
 
 .status-tabs {
@@ -942,10 +909,6 @@ button.link-pill:disabled {
   color: var(--amber);
 }
 
-.project-group[data-status="scheduled"] .group-head {
-  color: var(--violet);
-}
-
 .project-group[data-status="private-list"] .group-head {
   color: var(--violet);
 }
@@ -1303,7 +1266,6 @@ button.link-pill:disabled {
     flex: 1 1 auto;
   }
 
-  .source-tabs .tab,
   .status-tabs .tab {
     min-width: 0;
   }

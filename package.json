@@ -1,7 +1,7 @@
 {
   "name": "project-dashboard",
   "version": "0.1.0",
-  "description": "A local, dependency-free dashboard for tracking active projects, completed projects, local folders, repos, scheduled agent tasks, and online health.",
+  "description": "A local, dependency-free dashboard for tracking AI bot workstreams, projects, repos, and online health.",
   "license": "Apache-2.0",
   "type": "module",
   "repository": {
@@ -18,7 +18,7 @@
     "sync": "node scripts/sync-projects.mjs",
     "sync:dry-run": "node scripts/sync-projects.mjs --dry-run",
     "test": "node --test",
-    "check": "node --check server.mjs && node --check public/app.js && node --check lib/project-sync.mjs && node --check lib/sync-config.mjs && node --check lib/status-file.mjs && node --check lib/discovery.mjs && node --check lib/automations.mjs && node --check lib/prefs.mjs && node --check lib/claude-tasks.mjs && node --check lib/automation-actions.mjs && node --check lib/json-files.mjs && node --check lib/next-projects.mjs && node --check lib/waiting-prs.mjs && node --check scripts/sync-projects.mjs && node --check test/discovery.test.mjs"
+    "check": "node --check server.mjs && node --check public/app.js && node --check lib/project-sync.mjs && node --check lib/sync-config.mjs && node --check lib/status-file.mjs && node --check lib/discovery.mjs && node --check lib/prefs.mjs && node --check lib/json-files.mjs && node --check lib/next-projects.mjs && node --check lib/waiting-prs.mjs && node --check scripts/sync-projects.mjs && node --check test/discovery.test.mjs && node --check test/bot-grouping.test.mjs"
   },
   "engines": {
     "node": ">=20"

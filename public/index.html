@@ -36,10 +36,6 @@
           <span class="metric" id="metric-planning">0</span>
           <span class="label">Planning</span>
         </article>
-        <article data-tone="scheduled">
-          <span class="metric" id="metric-scheduled">0</span>
-          <span class="label">Scheduled</span>
-        </article>
         <article data-tone="completed">
           <span class="metric" id="metric-completed">0</span>
           <span class="label">Completed</span>
@@ -60,7 +56,6 @@
         <aside class="rail" aria-label="Dashboard views">
           <nav class="view-nav" role="tablist" aria-label="Dashboard views">
             <button class="tab view-tab is-active" type="button" data-view="projects">Tracked projects</button>
-            <button class="tab view-tab" type="button" data-view="scheduled">Scheduled</button>
             <button class="tab view-tab" type="button" data-view="next">What's next</button>
             <button class="tab view-tab" type="button" data-view="online">Online</button>
             <button class="tab view-tab" type="button" data-view="checklists">Checklists</button>
@@ -71,11 +66,6 @@
         <div class="content">
           <section class="control-band" aria-label="Dashboard filters">
             <div class="filter-stack">
-              <div class="tabs source-tabs" role="tablist" aria-label="Project source filters">
-                <button class="tab source-tab" type="button" data-source-filter="claude">Claude</button>
-                <button class="tab source-tab" type="button" data-source-filter="codex">Codex</button>
-                <button class="tab source-tab is-active" type="button" data-source-filter="all">All</button>
-              </div>
               <div class="tabs status-tabs" role="tablist" aria-label="Project status filters">
                 <button class="tab status-tab is-active" type="button" data-status-filter="all">All</button>
                 <button class="tab status-tab" type="button" data-status-filter="ongoing">Ongoing</button>
@@ -105,16 +95,6 @@
               <p id="last-updated" class="timestamp">Loading...</p>
             </div>
           </div>
-
-          <section class="scheduled-band" id="scheduled-band" aria-label="Scheduled task filters" hidden>
-            <div class="filter-stack">
-              <div class="tabs source-tabs" role="tablist" aria-label="Scheduled task source filters">
-                <button class="tab scheduled-source-tab" type="button" data-scheduled-source="claude">Claude</button>
-                <button class="tab scheduled-source-tab" type="button" data-scheduled-source="codex">Codex</button>
-                <button class="tab scheduled-source-tab is-active" type="button" data-scheduled-source="all">All</button>
-              </div>
-            </div>
-          </section>
 
           <div id="project-list" class="project-list" aria-live="polite"></div>
 
